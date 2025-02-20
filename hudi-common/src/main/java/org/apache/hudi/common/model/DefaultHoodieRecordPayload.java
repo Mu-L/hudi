@@ -36,10 +36,14 @@ import java.util.Map;
 import java.util.Properties;
 import java.util.concurrent.atomic.AtomicBoolean;
 
+import static org.apache.hudi.common.model.HoodieRecord.DEFAULT_ORDERING_VALUE;
+
 /**
+ * Default payload.
  * {@link HoodieRecordPayload} impl that honors ordering field in both preCombine and combineAndGetUpdateValue.
  * <p>
- * 1. preCombine - Picks the latest delta record for a key, based on an ordering field 2. combineAndGetUpdateValue/getInsertValue - Chooses the latest record based on ordering field value.
+ * 1. preCombine - Picks the latest delta record for a key, based on an ordering field
+ * 2. combineAndGetUpdateValue/getInsertValue - Chooses the latest record based on ordering field value.
  */
 public class DefaultHoodieRecordPayload extends OverwriteWithLatestAvroPayload {
   public static final String METADATA_EVENT_TIME_KEY = "metadata.event_time.key";
@@ -54,7 +58,21 @@ public class DefaultHoodieRecordPayload extends OverwriteWithLatestAvroPayload {
   }
 
   public DefaultHoodieRecordPayload(Option<GenericRecord> record) {
-    this(record.isPresent() ? record.get() : null, 0); // natural order
+    this(record.isPresent() ? record.get() : null, DEFAULT_ORDERING_VALUE); // natural order
+  }
+
+  @Override
+  public OverwriteWithLatestAvroPayload preCombine(OverwriteWithLatestAvroPayload oldValue) {
+    if (oldValue.recordBytes.length == 0) {
+      // use natural order for delete record
+      return this;
+    }
+    if (oldValue.orderingVal.compareTo(orderingVal) > 0) {
+      // pick the payload with greatest ordering value
+      return oldValue;
+    } else {
+      return this;
+    }
   }
 
   @Override

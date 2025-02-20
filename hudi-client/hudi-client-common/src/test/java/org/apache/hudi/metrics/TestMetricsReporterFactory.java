@@ -20,13 +20,17 @@
 package org.apache.hudi.metrics;
 
 import org.apache.hudi.common.config.TypedProperties;
-import org.apache.hudi.config.HoodieWriteConfig;
+import org.apache.hudi.config.metrics.HoodieMetricsConfig;
 import org.apache.hudi.exception.HoodieException;
 import org.apache.hudi.metrics.custom.CustomizableMetricsReporter;
+import org.apache.hudi.metrics.prometheus.PrometheusReporter;
+import org.apache.hudi.metrics.prometheus.PushGatewayMetricsReporter;
 
 import com.codahale.metrics.MetricRegistry;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.extension.ExtendWith;
+import org.junit.jupiter.params.ParameterizedTest;
+import org.junit.jupiter.params.provider.MethodSource;
 import org.mockito.Mock;
 import org.mockito.junit.jupiter.MockitoExtension;
 
@@ -41,27 +45,37 @@ import static org.mockito.Mockito.when;
 public class TestMetricsReporterFactory {
 
   @Mock
-  HoodieWriteConfig config;
+  HoodieMetricsConfig metricsConfig;
 
   @Mock
   MetricRegistry registry;
 
-  @Test
-  public void metricsReporterFactoryShouldReturnReporter() {
-    when(config.getMetricsReporterType()).thenReturn(MetricsReporterType.INMEMORY);
-    MetricsReporter reporter = MetricsReporterFactory.createReporter(config, registry).get();
-    assertTrue(reporter instanceof InMemoryMetricsReporter);
+  public static Object[][] params() {
+    return new Object[][] {
+        {MetricsReporterType.INMEMORY, InMemoryMetricsReporter.class},
+        {MetricsReporterType.CONSOLE, ConsoleMetricsReporter.class},
+        {MetricsReporterType.PROMETHEUS, PrometheusReporter.class},
+        {MetricsReporterType.PROMETHEUS_PUSHGATEWAY, PushGatewayMetricsReporter.class},
+        {MetricsReporterType.SLF4J, Slf4jMetricsReporter.class}};
+  }
+
+  @ParameterizedTest
+  @MethodSource("params")
+  public void metricsReporterFactoryShouldReturnReporter(MetricsReporterType type, Class expectClazz) {
+    when(metricsConfig.getMetricsReporterType()).thenReturn(type);
+    MetricsReporter reporter = MetricsReporterFactory.createReporter(metricsConfig, registry).get();
+    assertEquals(reporter.getClass(), expectClazz);
   }
 
   @Test
   public void metricsReporterFactoryShouldReturnUserDefinedReporter() {
-    when(config.getMetricReporterClassName()).thenReturn(DummyMetricsReporter.class.getName());
+    when(metricsConfig.getMetricReporterClassName()).thenReturn(DummyMetricsReporter.class.getName());
 
     TypedProperties props = new TypedProperties();
     props.setProperty("testKey", "testValue");
 
-    when(config.getProps()).thenReturn(props);
-    MetricsReporter reporter = MetricsReporterFactory.createReporter(config, registry).get();
+    when(metricsConfig.getProps()).thenReturn(props);
+    MetricsReporter reporter = MetricsReporterFactory.createReporter(metricsConfig, registry).get();
     assertTrue(reporter instanceof CustomizableMetricsReporter);
     assertEquals(props, ((DummyMetricsReporter) reporter).getProps());
     assertEquals(registry, ((DummyMetricsReporter) reporter).getRegistry());
@@ -69,9 +83,9 @@ public class TestMetricsReporterFactory {
 
   @Test
   public void metricsReporterFactoryShouldThrowExceptionWhenMetricsReporterClassIsIllegal() {
-    when(config.getMetricReporterClassName()).thenReturn(IllegalTestMetricsReporter.class.getName());
-    when(config.getProps()).thenReturn(new TypedProperties());
-    assertThrows(HoodieException.class, () -> MetricsReporterFactory.createReporter(config, registry));
+    when(metricsConfig.getMetricReporterClassName()).thenReturn(IllegalTestMetricsReporter.class.getName());
+    when(metricsConfig.getProps()).thenReturn(new TypedProperties());
+    assertThrows(HoodieException.class, () -> MetricsReporterFactory.createReporter(metricsConfig, registry));
   }
 
   public static class DummyMetricsReporter extends CustomizableMetricsReporter {
@@ -81,18 +95,22 @@ public class TestMetricsReporterFactory {
     }
 
     @Override
-    public void start() {}
+    public void start() {
+    }
 
     @Override
-    public void report() {}
+    public void report() {
+    }
 
     @Override
-    public void stop() {}
+    public void stop() {
+    }
   }
 
   public static class IllegalTestMetricsReporter {
 
-    public IllegalTestMetricsReporter(Properties props, MetricRegistry registry) {}
+    public IllegalTestMetricsReporter(Properties props, MetricRegistry registry) {
+    }
   }
 }
 

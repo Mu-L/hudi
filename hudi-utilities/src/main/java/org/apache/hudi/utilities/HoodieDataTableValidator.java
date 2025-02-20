@@ -26,13 +26,14 @@ import org.apache.hudi.common.fs.FSUtils;
 import org.apache.hudi.common.table.HoodieTableMetaClient;
 import org.apache.hudi.common.table.timeline.HoodieActiveTimeline;
 import org.apache.hudi.common.table.timeline.HoodieInstant;
-import org.apache.hudi.common.table.timeline.HoodieTimeline;
 import org.apache.hudi.common.util.Option;
 import org.apache.hudi.common.util.collection.Pair;
 import org.apache.hudi.exception.HoodieException;
 import org.apache.hudi.exception.HoodieValidationException;
+import org.apache.hudi.hadoop.fs.HadoopFSUtils;
 import org.apache.hudi.metadata.FileSystemBackedTableMetadata;
 import org.apache.hudi.metadata.HoodieTableMetadata;
+import org.apache.hudi.storage.StoragePath;
 import org.apache.hudi.table.repair.RepairUtils;
 
 import com.beust.jcommander.JCommander;
@@ -57,7 +58,11 @@ import java.util.concurrent.Executors;
 import java.util.stream.Collectors;
 import java.util.stream.Stream;
 
+import static org.apache.hudi.common.table.timeline.InstantComparison.LESSER_THAN;
+import static org.apache.hudi.common.table.timeline.InstantComparison.compareTimestamps;
+
 /**
+ * TODO: [HUDI-8294]
  * A validator with spark-submit to ensure there are no dangling data files in the data table.
  * No data files found for commits prior to active timeline.
  * No extra data files found for completed commits more than whats present in commit metadata.
@@ -122,7 +127,8 @@ public class HoodieDataTableValidator implements Serializable {
         : readConfigFromFileSystem(jsc, cfg);
 
     this.metaClient = HoodieTableMetaClient.builder()
-        .setConf(jsc.hadoopConfiguration()).setBasePath(cfg.basePath)
+        .setConf(HadoopFSUtils.getStorageConfWithCopy(jsc.hadoopConfiguration()))
+        .setBasePath(cfg.basePath)
         .setLoadActiveTimelineOnLoad(true)
         .build();
 
@@ -294,40 +300,43 @@ public class HoodieDataTableValidator implements Serializable {
   public void doDataTableValidation() {
     boolean finalResult = true;
     metaClient.reloadActiveTimeline();
-    String basePath = metaClient.getBasePath();
     HoodieSparkEngineContext engineContext = new HoodieSparkEngineContext(jsc);
     try {
       HoodieTableMetadata tableMetadata = new FileSystemBackedTableMetadata(
-          engineContext, metaClient.getTableConfig(), engineContext.getHadoopConf(), cfg.basePath);
-      List<Path> allDataFilePaths = HoodieDataTableUtils.getBaseAndLogFilePathsFromFileSystem(tableMetadata, cfg.basePath);
+          engineContext, metaClient.getTableConfig(), metaClient.getStorage(), cfg.basePath);
+      List<StoragePath> allDataFilePaths =
+          HoodieDataTableUtils.getBaseAndLogFilePathsFromFileSystem(tableMetadata, cfg.basePath);
       // verify that no data files present with commit time < earliest commit in active timeline.
       if (metaClient.getActiveTimeline().firstInstant().isPresent()) {
-        String earliestInstant = metaClient.getActiveTimeline().firstInstant().get().getTimestamp();
-        List<Path> danglingFilePaths = allDataFilePaths.stream().filter(path -> {
+        String earliestInstant = metaClient.getActiveTimeline().firstInstant().get().requestedTime();
+        List<StoragePath> danglingFilePaths = allDataFilePaths.stream().filter(path -> {
           String instantTime = FSUtils.getCommitTime(path.getName());
-          return HoodieTimeline.compareTimestamps(instantTime, HoodieTimeline.LESSER_THAN, earliestInstant);
+          return compareTimestamps(instantTime, LESSER_THAN,
+              earliestInstant);
         }).collect(Collectors.toList());
 
         if (!danglingFilePaths.isEmpty() && danglingFilePaths.size() > 0) {
-          LOG.error("Data table validation failed due to dangling files count " + danglingFilePaths.size() + ", found before active timeline");
+          LOG.error("Data table validation failed due to dangling files count "
+              + danglingFilePaths.size() + ", found before active timeline");
           danglingFilePaths.forEach(entry -> LOG.error("Dangling file: " + entry.toString()));
           finalResult = false;
           if (!cfg.ignoreFailed) {
-            throw new HoodieValidationException("Data table validation failed due to dangling files " + danglingFilePaths.size());
+            throw new HoodieValidationException(
+                "Data table validation failed due to dangling files " + danglingFilePaths.size());
           }
         }
 
         // Verify that for every completed commit in active timeline, there are no extra files found apart from what is present in
         // commit metadata.
         Map<String, List<String>> instantToFilesMap = RepairUtils.tagInstantsOfBaseAndLogFiles(
-            metaClient.getBasePath(), allDataFilePaths);
+            metaClient.getBasePath().toString(), allDataFilePaths);
         HoodieActiveTimeline activeTimeline = metaClient.getActiveTimeline();
         List<HoodieInstant> hoodieInstants = activeTimeline.filterCompletedInstants().getInstants();
 
         List<String> danglingFiles = engineContext.flatMap(hoodieInstants, instant -> {
           Option<Set<String>> filesFromTimeline = RepairUtils.getBaseAndLogFilePathsFromTimeline(
               activeTimeline, instant);
-          List<String> baseAndLogFilesFromFs = instantToFilesMap.containsKey(instant.getTimestamp()) ? instantToFilesMap.get(instant.getTimestamp())
+          List<String> baseAndLogFilesFromFs = instantToFilesMap.containsKey(instant.requestedTime()) ? instantToFilesMap.get(instant.requestedTime())
               : Collections.emptyList();
           if (!baseAndLogFilesFromFs.isEmpty()) {
             Set<String> danglingInstantFiles = new HashSet<>(baseAndLogFilesFromFs);

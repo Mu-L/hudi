@@ -103,7 +103,7 @@ public class TestRollbacksCommand extends CLIFunctionalTestHarness {
         .withRollbackUsingMarkers(false)
         .withIndexConfig(HoodieIndexConfig.newBuilder().withIndexType(HoodieIndex.IndexType.INMEMORY).build()).build();
     try (HoodieTableMetadataWriter metadataWriter = SparkHoodieBackedTableMetadataWriter.create(
-        metaClient.getHadoopConf(), config, context)) {
+        metaClient.getStorageConf(), config, context)) {
       HoodieMetadataTestTable.of(metaClient, metadataWriter, Option.of(context))
           .withPartitionMetaFiles(DEFAULT_PARTITION_PATHS)
           .addCommit("100")
@@ -177,7 +177,7 @@ public class TestRollbacksCommand extends CLIFunctionalTestHarness {
     HoodieInstant instant = rollback.findFirst().orElse(null);
     assertNotNull(instant, "The instant can not be null.");
 
-    Object result = shell.evaluate(() -> "show rollback --instant " + instant.getTimestamp());
+    Object result = shell.evaluate(() -> "show rollback --instant " + instant.requestedTime());
     assertTrue(ShellEvaluationResultUtil.isSuccess(result));
 
     List<Comparable[]> rows = new ArrayList<>();

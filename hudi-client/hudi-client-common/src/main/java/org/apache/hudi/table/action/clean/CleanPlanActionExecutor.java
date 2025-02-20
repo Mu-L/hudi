@@ -25,9 +25,11 @@ import org.apache.hudi.avro.model.HoodieCleanerPlan;
 import org.apache.hudi.common.engine.HoodieEngineContext;
 import org.apache.hudi.common.model.CleanFileInfo;
 import org.apache.hudi.common.model.HoodieCleaningPolicy;
+import org.apache.hudi.common.table.timeline.HoodieActiveTimeline;
 import org.apache.hudi.common.table.timeline.HoodieInstant;
 import org.apache.hudi.common.table.timeline.HoodieTimeline;
 import org.apache.hudi.common.table.timeline.TimelineMetadataUtils;
+import org.apache.hudi.common.table.timeline.versioning.v1.InstantComparatorV1;
 import org.apache.hudi.common.util.CleanerUtils;
 import org.apache.hudi.common.util.Option;
 import org.apache.hudi.common.util.collection.Pair;
@@ -48,8 +50,8 @@ import java.util.List;
 import java.util.Map;
 import java.util.stream.Collectors;
 
+import static org.apache.hudi.common.util.CleanerUtils.SAVEPOINTED_TIMESTAMPS;
 import static org.apache.hudi.common.util.MapUtils.nonEmpty;
-import static org.apache.hudi.table.action.clean.CleanPlanner.SAVEPOINTED_TIMESTAMPS;
 
 public class CleanPlanActionExecutor<T, I, K, O> extends BaseActionExecutor<T, I, K, O, Option<HoodieCleanerPlan>> {
 
@@ -113,36 +115,52 @@ public class CleanPlanActionExecutor<T, I, K, O> extends BaseActionExecutor<T, I
         LOG.info("Nothing to clean here. It is already clean");
         return HoodieCleanerPlan.newBuilder().setPolicy(HoodieCleaningPolicy.KEEP_LATEST_COMMITS.name()).build();
       }
-      LOG.info("Earliest commit to retain for clean : " + (earliestInstant.isPresent() ? earliestInstant.get().getTimestamp() : "null"));
-      LOG.info("Total partitions to clean : " + partitionsToClean.size() + ", with policy " + config.getCleanerPolicy());
+      LOG.info(
+          "Earliest commit to retain for clean : {}",
+          earliestInstant.isPresent() ? earliestInstant.get().requestedTime() : "null");
+      LOG.info(
+          "Total partitions to clean : {}, with policy {}",
+          partitionsToClean.size(),
+          config.getCleanerPolicy());
       int cleanerParallelism = Math.min(partitionsToClean.size(), config.getCleanerParallelism());
-      LOG.info("Using cleanerParallelism: " + cleanerParallelism);
+      LOG.info(
+          "Using cleanerParallelism: {}", cleanerParallelism);
 
       context.setJobStatus(this.getClass().getSimpleName(), "Generating list of file slices to be cleaned: " + config.getTableName());
 
       Map<String, List<HoodieCleanFileInfo>> cleanOps = new HashMap<>();
       List<String> partitionsToDelete = new ArrayList<>();
+      boolean shouldUseBatchLookup = table.getMetaClient().getTableConfig().isMetadataTableAvailable();
       for (int i = 0; i < partitionsToClean.size(); i += cleanerParallelism) {
         // Handles at most 'cleanerParallelism' number of partitions once at a time to avoid overlarge memory pressure to the timeline server
         // (remote or local embedded), thus to reduce the risk of an OOM exception.
         List<String> subPartitionsToClean = partitionsToClean.subList(i, Math.min(i + cleanerParallelism, partitionsToClean.size()));
+        if (shouldUseBatchLookup) {
+          LOG.info("Load partitions and files into file system view in advance. Paths: {}", subPartitionsToClean);
+          table.getHoodieView().loadPartitions(subPartitionsToClean);
+        }
         Map<String, Pair<Boolean, List<CleanFileInfo>>> cleanOpsWithPartitionMeta = context
             .map(subPartitionsToClean, partitionPathToClean -> Pair.of(partitionPathToClean, planner.getDeletePaths(partitionPathToClean, earliestInstant)), cleanerParallelism)
             .stream()
             .collect(Collectors.toMap(Pair::getKey, Pair::getValue));
 
         cleanOps.putAll(cleanOpsWithPartitionMeta.entrySet().stream()
+            .filter(e -> !e.getValue().getValue().isEmpty())
             .collect(Collectors.toMap(Map.Entry::getKey, e -> CleanerUtils.convertToHoodieCleanFileInfoList(e.getValue().getValue()))));
 
         partitionsToDelete.addAll(cleanOpsWithPartitionMeta.entrySet().stream().filter(entry -> entry.getValue().getKey()).map(Map.Entry::getKey)
             .collect(Collectors.toList()));
       }
 
-      return new HoodieCleanerPlan(earliestInstant
-          .map(x -> new HoodieActionInstant(x.getTimestamp(), x.getAction(), x.getState().name())).orElse(null),
-          planner.getLastCompletedCommitTimestamp(),
-          config.getCleanerPolicy().name(), Collections.emptyMap(),
-          CleanPlanner.LATEST_CLEAN_PLAN_VERSION, cleanOps, partitionsToDelete, prepareExtraMetadata(planner.getSavepointedTimestamps()));
+      return new HoodieCleanerPlan(
+          earliestInstant.map(x -> new HoodieActionInstant(x.requestedTime(), x.getAction(), x.getState().name())).orElse(null),
+          planner.getLastCompletedCommitTimestamp(), // Note: This is the start time of the last completed ingestion before this clean.
+          config.getCleanerPolicy().name(),
+          Collections.emptyMap(),
+          CleanPlanner.LATEST_CLEAN_PLAN_VERSION,
+          cleanOps,
+          partitionsToDelete,
+          prepareExtraMetadata(planner.getSavepointedTimestamps()));
     } catch (IOException e) {
       throw new HoodieIOException("Failed to schedule clean operation", e);
     }
@@ -152,7 +170,9 @@ public class CleanPlanActionExecutor<T, I, K, O> extends BaseActionExecutor<T, I
     if (savepointedTimestamps.isEmpty()) {
       return Collections.emptyMap();
     } else {
-      return Collections.singletonMap(SAVEPOINTED_TIMESTAMPS, savepointedTimestamps.stream().collect(Collectors.joining(",")));
+      Map<String, String> extraMetadata = new HashMap<>();
+      extraMetadata.put(SAVEPOINTED_TIMESTAMPS, savepointedTimestamps.stream().collect(Collectors.joining(",")));
+      return extraMetadata;
     }
   }
 
@@ -164,12 +184,33 @@ public class CleanPlanActionExecutor<T, I, K, O> extends BaseActionExecutor<T, I
    * @return Cleaner Plan if generated
    */
   protected Option<HoodieCleanerPlan> requestClean(String startCleanTime) {
+    // Check if the last clean completed successfully and wrote out its metadata. If not, it should be retried.
+    Option<HoodieInstant> lastClean = table.getCleanTimeline().filterCompletedInstants().lastInstant();
+    if (lastClean.isPresent()) {
+      HoodieInstant cleanInstant = lastClean.get();
+      HoodieActiveTimeline activeTimeline = table.getActiveTimeline();
+      if (activeTimeline.isEmpty(cleanInstant)) {
+        activeTimeline.deleteEmptyInstantIfExists(cleanInstant);
+        HoodieInstant cleanPlanInstant = new HoodieInstant(HoodieInstant.State.INFLIGHT, cleanInstant.getAction(), cleanInstant.requestedTime(), InstantComparatorV1.REQUESTED_TIME_BASED_COMPARATOR);
+        try {
+          Option<byte[]> content = activeTimeline.getInstantDetails(cleanPlanInstant);
+          // Deserialize plan if it is non-empty
+          if (content.map(bytes -> bytes.length > 0).orElse(false)) {
+            return Option.of(TimelineMetadataUtils.deserializeCleanerPlan(content.get()));
+          } else {
+            return Option.of(new HoodieCleanerPlan());
+          }
+        } catch (IOException ex) {
+          throw new HoodieIOException("Failed to parse cleaner plan", ex);
+        }
+      }
+    }
     final HoodieCleanerPlan cleanerPlan = requestClean(context);
     Option<HoodieCleanerPlan> option = Option.empty();
     if (nonEmpty(cleanerPlan.getFilePathsToBeDeletedPerPartition())
         && cleanerPlan.getFilePathsToBeDeletedPerPartition().values().stream().mapToInt(List::size).sum() > 0) {
       // Only create cleaner plan which does some work
-      final HoodieInstant cleanInstant = new HoodieInstant(HoodieInstant.State.REQUESTED, HoodieTimeline.CLEAN_ACTION, startCleanTime);
+      final HoodieInstant cleanInstant = instantGenerator.createNewInstant(HoodieInstant.State.REQUESTED, HoodieTimeline.CLEAN_ACTION, startCleanTime);
       // Save to both aux and timeline folder
       try {
         table.getActiveTimeline().saveToCleanRequested(cleanInstant, TimelineMetadataUtils.serializeCleanerPlan(cleanerPlan));

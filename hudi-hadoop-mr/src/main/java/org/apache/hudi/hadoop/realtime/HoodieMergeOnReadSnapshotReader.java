@@ -21,8 +21,8 @@ package org.apache.hudi.hadoop.realtime;
 import org.apache.hudi.common.model.HoodieAvroIndexedRecord;
 import org.apache.hudi.common.model.HoodieLogFile;
 import org.apache.hudi.common.model.HoodieRecord;
+import org.apache.hudi.common.serialization.DefaultSerializer;
 import org.apache.hudi.common.table.log.HoodieMergedLogRecordScanner;
-import org.apache.hudi.common.util.ConfigUtils;
 import org.apache.hudi.common.util.DefaultSizeEstimator;
 import org.apache.hudi.common.util.FileIOUtils;
 import org.apache.hudi.common.util.HoodieRecordSizeEstimator;
@@ -33,6 +33,7 @@ import org.apache.hudi.common.util.collection.ExternalSpillableMap;
 import org.apache.hudi.hadoop.fs.HadoopFSUtils;
 import org.apache.hudi.hadoop.utils.HoodieInputFormatUtils;
 import org.apache.hudi.io.storage.HoodieFileReader;
+import org.apache.hudi.storage.HoodieStorageUtils;
 
 import org.apache.avro.Schema;
 import org.apache.hadoop.fs.Path;
@@ -53,7 +54,6 @@ import static org.apache.hudi.common.config.HoodieCommonConfig.SPILLABLE_DISK_MA
 import static org.apache.hudi.common.config.HoodieMemoryConfig.DEFAULT_MR_MAX_DFS_STREAM_BUFFER_SIZE;
 import static org.apache.hudi.common.config.HoodieMemoryConfig.MAX_DFS_STREAM_BUFFER_SIZE;
 import static org.apache.hudi.common.config.HoodieMemoryConfig.SPILLABLE_MAP_BASE_PATH;
-import static org.apache.hudi.common.config.HoodieReaderConfig.COMPACTION_LAZY_BLOCK_READ_ENABLE;
 import static org.apache.hudi.common.config.HoodieReaderConfig.ENABLE_OPTIMIZED_LOG_BLOCKS_SCAN;
 import static org.apache.hudi.hadoop.utils.HoodieRealtimeRecordReaderUtils.getBaseFileReader;
 import static org.apache.hudi.hadoop.utils.HoodieRealtimeRecordReaderUtils.getMaxCompactionMemoryInBytes;
@@ -122,7 +122,9 @@ public class HoodieMergeOnReadSnapshotReader extends AbstractRealtimeRecordReade
         new DefaultSizeEstimator(),
         new HoodieRecordSizeEstimator(readerSchema),
         jobConf.getEnum(SPILLABLE_DISK_MAP_TYPE.key(), SPILLABLE_DISK_MAP_TYPE.defaultValue()),
-        jobConf.getBoolean(DISK_MAP_BITCASK_COMPRESSION_ENABLED.key(), DISK_MAP_BITCASK_COMPRESSION_ENABLED.defaultValue()));
+        new DefaultSerializer<>(),
+        jobConf.getBoolean(DISK_MAP_BITCASK_COMPRESSION_ENABLED.key(), DISK_MAP_BITCASK_COMPRESSION_ENABLED.defaultValue()),
+        getClass().getSimpleName());
     try (ClosableIterator<String> baseFileIterator = baseFileReader.getRecordKeyIterator()) {
       timer.startTimer();
       while (baseFileIterator.hasNext()) {
@@ -180,14 +182,13 @@ public class HoodieMergeOnReadSnapshotReader extends AbstractRealtimeRecordReade
 
   private HoodieMergedLogRecordScanner getMergedLogRecordScanner() {
     return HoodieMergedLogRecordScanner.newBuilder()
-        .withFileSystem(HadoopFSUtils.getFs(split.getPath().toString(), jobConf))
+        .withStorage(HoodieStorageUtils.getStorage(
+            split.getPath().toString(), HadoopFSUtils.getStorageConf(jobConf)))
         .withBasePath(tableBasePath)
         .withLogFilePaths(logFilePaths.stream().map(logFile -> logFile.getPath().toString()).collect(Collectors.toList()))
         .withReaderSchema(readerSchema)
         .withLatestInstantTime(latestInstantTime)
         .withMaxMemorySizeInBytes(getMaxCompactionMemoryInBytes(jobConf))
-        .withReadBlocksLazily(
-            ConfigUtils.getBooleanWithAltKeys(jobConf, COMPACTION_LAZY_BLOCK_READ_ENABLE))
         .withReverseReader(false)
         .withBufferSize(jobConf.getInt(MAX_DFS_STREAM_BUFFER_SIZE.key(),
             DEFAULT_MR_MAX_DFS_STREAM_BUFFER_SIZE))

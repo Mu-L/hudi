@@ -19,6 +19,7 @@
 package org.apache.hudi.utilities.sources;
 
 import org.apache.hudi.common.config.TypedProperties;
+import org.apache.hudi.common.table.checkpoint.Checkpoint;
 import org.apache.hudi.common.util.Option;
 import org.apache.hudi.utilities.UtilHelpers;
 import org.apache.hudi.utilities.deser.KafkaAvroSchemaDeserializer;
@@ -27,6 +28,8 @@ import org.apache.hudi.utilities.ingestion.HoodieIngestionMetrics;
 import org.apache.hudi.utilities.schema.SchemaProvider;
 import org.apache.hudi.utilities.sources.helpers.AvroConvertor;
 import org.apache.hudi.utilities.sources.helpers.KafkaOffsetGen;
+import org.apache.hudi.utilities.streamer.DefaultStreamContext;
+import org.apache.hudi.utilities.streamer.StreamContext;
 
 import org.apache.avro.generic.GenericRecord;
 import org.apache.kafka.clients.consumer.ConsumerRecord;
@@ -50,7 +53,7 @@ import static org.apache.hudi.utilities.config.KafkaSourceConfig.KAFKA_VALUE_DES
 /**
  * Reads avro serialized Kafka data, based on the confluent schema-registry.
  */
-public class AvroKafkaSource extends KafkaSource<GenericRecord> {
+public class AvroKafkaSource extends KafkaSource<JavaRDD<GenericRecord>> {
 
   private static final Logger LOG = LoggerFactory.getLogger(AvroKafkaSource.class);
   // These are settings used to pass things to KafkaAvroDeserializer
@@ -69,10 +72,13 @@ public class AvroKafkaSource extends KafkaSource<GenericRecord> {
 
   public AvroKafkaSource(TypedProperties props, JavaSparkContext sparkContext, SparkSession sparkSession,
                          SchemaProvider schemaProvider, HoodieIngestionMetrics metrics) {
-    super(props, sparkContext, sparkSession,
-        UtilHelpers.getSchemaProviderForKafkaSource(schemaProvider, props, sparkContext),
-        SourceType.AVRO, metrics);
-    this.originalSchemaProvider = schemaProvider;
+    this(props, sparkContext, sparkSession, metrics, new DefaultStreamContext(schemaProvider, Option.empty()));
+  }
+
+  public AvroKafkaSource(TypedProperties properties, JavaSparkContext sparkContext, SparkSession sparkSession, HoodieIngestionMetrics metrics, StreamContext streamContext) {
+    super(properties, sparkContext, sparkSession, SourceType.AVRO, metrics,
+        new DefaultStreamContext(UtilHelpers.getSchemaProviderForKafkaSource(streamContext.getSchemaProvider(), properties, sparkContext), streamContext.getSourceProfileSupplier()));
+    this.originalSchemaProvider = streamContext.getSchemaProvider();
 
     props.put(NATIVE_KAFKA_KEY_DESERIALIZER_PROP, StringDeserializer.class.getName());
     deserializerClassName = getStringWithAltKeys(props, KAFKA_AVRO_VALUE_DESERIALIZER_CLASS, true);
@@ -92,16 +98,16 @@ public class AvroKafkaSource extends KafkaSource<GenericRecord> {
   }
 
   @Override
-  protected InputBatch<JavaRDD<GenericRecord>> fetchNewData(Option<String> lastCheckpointStr, long sourceLimit) {
+  protected InputBatch<JavaRDD<GenericRecord>> readFromCheckpoint(Option<Checkpoint> lastCheckpoint, long sourceLimit) {
     if (deserializerClassName.equals(KafkaAvroSchemaDeserializer.class.getName())) {
       configureSchemaDeserializer();
       offsetGen = new KafkaOffsetGen(props);
     }
-    return super.fetchNewData(lastCheckpointStr, sourceLimit);
+    return super.readFromCheckpoint(lastCheckpoint, sourceLimit);
   }
 
   @Override
-  JavaRDD<GenericRecord> toRDD(OffsetRange[] offsetRanges) {
+  protected JavaRDD<GenericRecord> toBatch(OffsetRange[] offsetRanges) {
     JavaRDD<ConsumerRecord<Object, Object>> kafkaRDD;
     if (deserializerClassName.equals(ByteArrayDeserializer.class.getName())) {
       if (schemaProvider == null) {

@@ -18,15 +18,16 @@
 
 package org.apache.hudi.utilities;
 
+import org.apache.hudi.SparkAdapterSupport$;
 import org.apache.hudi.client.SparkRDDWriteClient;
 import org.apache.hudi.client.common.HoodieSparkEngineContext;
 import org.apache.hudi.common.config.TypedProperties;
 import org.apache.hudi.config.HoodieWriteConfig;
+import org.apache.hudi.exception.HoodieException;
 
 import com.beust.jcommander.JCommander;
 import com.beust.jcommander.Parameter;
 import org.apache.hadoop.fs.Path;
-import org.apache.hudi.exception.HoodieException;
 import org.apache.spark.api.java.JavaSparkContext;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
@@ -110,12 +111,14 @@ public class HoodieCleaner {
     String dirName = new Path(cfg.basePath).getName();
     JavaSparkContext jssc = UtilHelpers.buildSparkContext("hoodie-cleaner-" + dirName, cfg.sparkMaster);
 
+    int exitCode = 0;
     try {
       new HoodieCleaner(cfg, jssc).run();
     } catch (Throwable throwable) {
+      exitCode = 1;
       throw new HoodieException("Failed to run cleaning for " + cfg.basePath, throwable);
     } finally {
-      jssc.stop();
+      SparkAdapterSupport$.MODULE$.sparkAdapter().stopSparkContext(jssc, exitCode);
     }
 
     LOG.info("Cleaner ran successfully");

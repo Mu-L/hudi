@@ -17,28 +17,29 @@
 
 package org.apache.spark.sql.hudi.command
 
-import org.apache.hadoop.fs.Path
-import org.apache.hudi.common.model.{HoodieFileFormat, HoodieTableType}
+import org.apache.hudi.{DataSourceWriteOptions, SparkAdapterSupport}
+import org.apache.hudi.common.model.HoodieTableType
 import org.apache.hudi.common.table.HoodieTableConfig
 import org.apache.hudi.common.util.ConfigUtils
-import org.apache.hudi.exception.HoodieException
-import org.apache.hudi.hadoop.HoodieParquetInputFormat
-import org.apache.hudi.hadoop.realtime.HoodieParquetRealtimeInputFormat
+import org.apache.hudi.exception.{HoodieException, HoodieValidationException}
 import org.apache.hudi.hadoop.utils.HoodieInputFormatUtils
-import org.apache.hudi.{DataSourceWriteOptions, SparkAdapterSupport}
+
+import org.apache.hadoop.fs.Path
+import org.apache.spark.{SPARK_VERSION, SparkConf}
+import org.apache.spark.sql.{AnalysisException, Row, SparkSession}
+import org.apache.spark.sql.avro.SchemaConverters
 import org.apache.spark.sql.catalyst.analysis.NoSuchDatabaseException
-import org.apache.spark.sql.catalyst.catalog.HoodieCatalogTable.needFilterProps
 import org.apache.spark.sql.catalyst.catalog._
+import org.apache.spark.sql.catalyst.catalog.HoodieCatalogTable.needFilterProps
+import org.apache.spark.sql.catalyst.expressions.Cast
 import org.apache.spark.sql.hive.HiveClientUtils
 import org.apache.spark.sql.hive.HiveExternalCatalog._
-import org.apache.spark.sql.hudi.HoodieSqlCommonUtils.isUsingHiveCatalog
 import org.apache.spark.sql.hudi.{HoodieOptionConfig, HoodieSqlCommonUtils}
+import org.apache.spark.sql.hudi.HoodieSqlCommonUtils.isUsingHiveCatalog
+import org.apache.spark.sql.hudi.command.CreateHoodieTableCommand.validateTableSchema
 import org.apache.spark.sql.internal.StaticSQLConf.SCHEMA_STRING_LENGTH_THRESHOLD
 import org.apache.spark.sql.types.StructType
-import org.apache.spark.sql.{AnalysisException, Row, SparkSession}
-import org.apache.spark.{SPARK_VERSION, SparkConf}
 
-import java.io.{PrintWriter, StringWriter}
 import scala.collection.JavaConverters._
 import scala.collection.mutable
 import scala.util.control.NonFatal
@@ -79,6 +80,7 @@ case class CreateHoodieTableCommand(table: CatalogTable, ignoreIfExists: Boolean
     }
 
     try {
+      validateTableSchema(table.schema, hoodieCatalogTable.tableSchemaWithoutMetaFields)
       // create catalog table for this hoodie table
       CreateHoodieTableCommand.createTableInCatalog(sparkSession, hoodieCatalogTable, ignoreIfExists, queryAsProp)
     } catch {
@@ -90,6 +92,33 @@ case class CreateHoodieTableCommand(table: CatalogTable, ignoreIfExists: Boolean
 }
 
 object CreateHoodieTableCommand {
+
+  def validateTableSchema(userDefinedSchema: StructType, hoodieTableSchema: StructType): Boolean = {
+    if (userDefinedSchema.fields.length != 0 &&
+      userDefinedSchema.fields.length != hoodieTableSchema.fields.length) {
+      false
+    } else if (userDefinedSchema.fields.length != 0) {
+      val sortedHoodieTableFields = hoodieTableSchema.fields.sortBy(_.name)
+      val sortedUserDefinedFields = userDefinedSchema.fields.sortBy(_.name)
+      val diffResult = sortedHoodieTableFields.zip(sortedUserDefinedFields).forall {
+        case (hoodieTableColumn, userDefinedColumn) =>
+          hoodieTableColumn.name.equals(userDefinedColumn.name) &&
+            (Cast.canCast(hoodieTableColumn.dataType, userDefinedColumn.dataType) ||
+              SchemaConverters.toAvroType(hoodieTableColumn.dataType)
+                .equals(SchemaConverters.toAvroType(userDefinedColumn.dataType)))
+      }
+      if (!diffResult) {
+        throw new HoodieValidationException(
+          s"The defined schema is inconsistent with the schema in the hoodie metadata directory," +
+            s" hoodieTableSchema: ${hoodieTableSchema.simpleString}," +
+            s" userDefinedSchema: ${userDefinedSchema.simpleString}")
+      } else {
+        true
+      }
+    } else {
+      true
+    }
+  }
 
   def validateTblProperties(hoodieCatalogTable: HoodieCatalogTable): Unit = {
     if (hoodieCatalogTable.hoodieTableExists) {
@@ -145,12 +174,17 @@ object CreateHoodieTableCommand {
 
     val partitionColumnNames = hoodieCatalogTable.partitionSchema.map(_.name)
     // Remove some properties should not be used;append pk, preCombineKey, type to the properties of table
-    val newTblProperties =
+    var newTblProperties =
       hoodieCatalogTable.catalogProperties.--(needFilterProps) ++ HoodieOptionConfig.extractSqlOptions(properties)
+
+    // Add provider -> hudi and path as a table property
+    newTblProperties = newTblProperties + ("provider" -> "hudi") + ("path" -> path)
+
     val newTable = table.copy(
       identifier = newTableIdentifier,
       storage = newStorage,
       schema = hoodieCatalogTable.tableSchema,
+      provider = Some("hudi"),
       partitionColumnNames = partitionColumnNames,
       createVersion = SPARK_VERSION,
       properties = newTblProperties

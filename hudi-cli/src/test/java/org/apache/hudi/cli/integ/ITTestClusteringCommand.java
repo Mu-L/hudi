@@ -28,15 +28,17 @@ import org.apache.hudi.client.common.HoodieSparkEngineContext;
 import org.apache.hudi.common.model.HoodieAvroPayload;
 import org.apache.hudi.common.model.HoodieRecord;
 import org.apache.hudi.common.model.HoodieTableType;
+import org.apache.hudi.common.table.HoodieTableVersion;
 import org.apache.hudi.common.table.timeline.HoodieActiveTimeline;
 import org.apache.hudi.common.table.timeline.HoodieInstant;
-import org.apache.hudi.common.table.timeline.versioning.TimelineLayoutVersion;
 import org.apache.hudi.common.testutils.HoodieTestDataGenerator;
 import org.apache.hudi.common.util.Option;
 import org.apache.hudi.config.HoodieIndexConfig;
 import org.apache.hudi.config.HoodieWriteConfig;
+import org.apache.hudi.hadoop.fs.HadoopFSUtils;
 import org.apache.hudi.index.HoodieIndex;
 import org.apache.hudi.testutils.HoodieClientTestBase;
+
 import org.apache.spark.api.java.JavaRDD;
 import org.apache.spark.api.java.JavaSparkContext;
 import org.junit.jupiter.api.BeforeEach;
@@ -71,11 +73,12 @@ public class ITTestClusteringCommand extends HoodieCLIIntegrationTestBase {
     tableName = "test_table_" + ITTestClusteringCommand.class.getName();
     basePath = Paths.get(basePath, tableName).toString();
 
-    HoodieCLI.conf = jsc.hadoopConfiguration();
+    HoodieCLI.conf = HadoopFSUtils.getStorageConfWithCopy(jsc.hadoopConfiguration());
     // Create table and connect
     new TableCommand().createTable(
         basePath, tableName, HoodieTableType.COPY_ON_WRITE.name(),
-        "", TimelineLayoutVersion.VERSION_1, "org.apache.hudi.common.model.HoodieAvroPayload");
+        "", HoodieTableVersion.current().versionCode(),
+        "org.apache.hudi.common.model.HoodieAvroPayload");
 
     initMetaClient();
   }
@@ -96,7 +99,7 @@ public class ITTestClusteringCommand extends HoodieCLIIntegrationTestBase {
 
     // there is 1 requested clustering
     HoodieActiveTimeline timeline = HoodieCLI.getTableMetaClient().getActiveTimeline();
-    assertEquals(1, timeline.filterPendingReplaceTimeline().countInstants());
+    assertEquals(1, timeline.filterPendingClusteringTimeline().countInstants());
   }
 
   /**
@@ -113,7 +116,7 @@ public class ITTestClusteringCommand extends HoodieCLIIntegrationTestBase {
     // get clustering instance
     HoodieActiveTimeline timeline = HoodieCLI.getTableMetaClient().getActiveTimeline();
     Option<String> instanceOpt =
-        timeline.filterPendingReplaceTimeline().firstInstant().map(HoodieInstant::getTimestamp);
+        timeline.filterPendingClusteringTimeline().firstInstant().map(HoodieInstant::requestedTime);
     assertTrue(instanceOpt.isPresent(), "Must have pending clustering.");
     final String instance = instanceOpt.get();
 
@@ -129,12 +132,12 @@ public class ITTestClusteringCommand extends HoodieCLIIntegrationTestBase {
     // assert clustering complete
     assertTrue(HoodieCLI.getTableMetaClient().getActiveTimeline().reload()
         .filterCompletedInstants().getInstantsAsStream()
-        .map(HoodieInstant::getTimestamp).collect(Collectors.toList()).contains(instance),
+        .map(HoodieInstant::requestedTime).collect(Collectors.toList()).contains(instance),
         "Pending clustering must be completed");
 
     assertTrue(HoodieCLI.getTableMetaClient().getActiveTimeline().reload()
             .getCompletedReplaceTimeline().getInstantsAsStream()
-            .map(HoodieInstant::getTimestamp).collect(Collectors.toList()).contains(instance),
+            .map(HoodieInstant::requestedTime).collect(Collectors.toList()).contains(instance),
         "Pending clustering must be completed");
   }
 
@@ -157,7 +160,7 @@ public class ITTestClusteringCommand extends HoodieCLIIntegrationTestBase {
     // assert clustering complete
     assertTrue(HoodieCLI.getTableMetaClient().getActiveTimeline().reload()
             .getCompletedReplaceTimeline().getInstantsAsStream()
-            .map(HoodieInstant::getTimestamp).count() > 0,
+            .map(HoodieInstant::requestedTime).count() > 0,
         "Completed clustering couldn't be 0");
   }
 

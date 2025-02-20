@@ -18,23 +18,24 @@
 
 package org.apache.hudi.execution.bulkinsert;
 
-import org.apache.avro.Schema;
 import org.apache.hudi.avro.HoodieAvroUtils;
 import org.apache.hudi.common.config.SerializableSchema;
 import org.apache.hudi.common.model.HoodieKey;
 import org.apache.hudi.common.model.HoodieRecord;
 import org.apache.hudi.common.util.collection.FlatLists;
 import org.apache.hudi.table.BucketIndexBulkInsertPartitioner;
-
 import org.apache.hudi.table.HoodieTable;
+
+import org.apache.avro.Schema;
 import org.apache.logging.log4j.LogManager;
 import org.apache.logging.log4j.Logger;
 import org.apache.spark.Partitioner;
 import org.apache.spark.api.java.JavaRDD;
-import scala.Tuple2;
 
 import java.io.Serializable;
 import java.util.Comparator;
+
+import scala.Tuple2;
 
 /**
  * Abstract of bucket index bulk_insert partitioner
@@ -61,9 +62,9 @@ public abstract class RDDBucketIndexPartitioner<T> extends BucketIndexBulkInsert
    */
 
   public JavaRDD<HoodieRecord<T>> doPartition(JavaRDD<HoodieRecord<T>> records, Partitioner partitioner) {
-    if (sortColumnNames != null && sortColumnNames.length > 0) {
+    if (isCustomSorted()) {
       return doPartitionAndCustomColumnSort(records, partitioner);
-    } else if (table.requireSortedRecords() || table.getConfig().getBulkInsertSortMode() != BulkInsertSortMode.NONE) {
+    } else if (isRecordKeySorted()) {
       return doPartitionAndSortByRecordKey(records, partitioner);
     } else {
       // By default, do partition only

@@ -18,7 +18,6 @@
 
 package org.apache.hudi.client.embedded;
 
-import org.apache.hudi.common.config.SerializableConfiguration;
 import org.apache.hudi.common.engine.HoodieEngineContext;
 import org.apache.hudi.common.metrics.Registry;
 import org.apache.hudi.common.table.marker.MarkerType;
@@ -27,11 +26,11 @@ import org.apache.hudi.common.table.view.FileSystemViewStorageConfig;
 import org.apache.hudi.common.table.view.FileSystemViewStorageType;
 import org.apache.hudi.common.util.NetworkUtils;
 import org.apache.hudi.config.HoodieWriteConfig;
-import org.apache.hudi.hadoop.fs.HadoopFSUtils;
+import org.apache.hudi.storage.HoodieStorage;
+import org.apache.hudi.storage.HoodieStorageUtils;
+import org.apache.hudi.storage.StorageConfiguration;
 import org.apache.hudi.timeline.service.TimelineService;
 
-import org.apache.hadoop.conf.Configuration;
-import org.apache.hadoop.fs.FileSystem;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
@@ -59,7 +58,7 @@ public class EmbeddedTimelineService {
   private int serverPort;
   private String hostAddr;
   private final HoodieEngineContext context;
-  private final SerializableConfiguration hadoopConf;
+  private final StorageConfiguration<?> storageConf;
   private final HoodieWriteConfig writeConfig;
   private TimelineService.Config serviceConfig;
   private final TimelineServiceIdentifier timelineServiceIdentifier;
@@ -76,7 +75,7 @@ public class EmbeddedTimelineService {
     this.timelineServiceIdentifier = timelineServiceIdentifier;
     this.basePaths = new HashSet<>();
     this.basePaths.add(writeConfig.getBasePath());
-    this.hadoopConf = context.getHadoopConf();
+    this.storageConf = context.getStorageConf();
     this.viewManager = createViewManager();
   }
 
@@ -181,16 +180,16 @@ public class EmbeddedTimelineService {
 
     this.serviceConfig = timelineServiceConfBuilder.build();
 
-    server = timelineServiceCreator.create(context, hadoopConf.newCopy(), serviceConfig,
-        HadoopFSUtils.getFs(writeConfig.getBasePath(), hadoopConf.newCopy()), viewManager);
+    server = timelineServiceCreator.create(context, storageConf.newInstance(), serviceConfig,
+        HoodieStorageUtils.getStorage(writeConfig.getBasePath(), storageConf.newInstance()), viewManager);
     serverPort = server.startService();
     LOG.info("Started embedded timeline server at " + hostAddr + ":" + serverPort);
   }
 
   @FunctionalInterface
   interface TimelineServiceCreator {
-    TimelineService create(HoodieEngineContext context, Configuration hadoopConf, TimelineService.Config timelineServerConf,
-                           FileSystem fileSystem, FileSystemViewManager globalFileSystemViewManager) throws IOException;
+    TimelineService create(HoodieEngineContext context, StorageConfiguration<?> storageConf, TimelineService.Config timelineServerConf,
+                           HoodieStorage storage, FileSystemViewManager globalFileSystemViewManager) throws IOException;
   }
 
   private void setHostAddr(String embeddedTimelineServiceHostAddr) {
@@ -206,20 +205,20 @@ public class EmbeddedTimelineService {
   /**
    * Retrieves proper view storage configs for remote clients to access this service.
    */
-  public FileSystemViewStorageConfig getRemoteFileSystemViewConfig() {
-    FileSystemViewStorageType viewStorageType = writeConfig.getClientSpecifiedViewStorageConfig()
+  public FileSystemViewStorageConfig getRemoteFileSystemViewConfig(HoodieWriteConfig clientWriteConfig) {
+    FileSystemViewStorageType viewStorageType = clientWriteConfig.getClientSpecifiedViewStorageConfig()
         .shouldEnableBackupForRemoteFileSystemView()
         ? FileSystemViewStorageType.REMOTE_FIRST : FileSystemViewStorageType.REMOTE_ONLY;
     return FileSystemViewStorageConfig.newBuilder()
         .withStorageType(viewStorageType)
         .withRemoteServerHost(hostAddr)
         .withRemoteServerPort(serverPort)
-        .withRemoteTimelineClientTimeoutSecs(writeConfig.getClientSpecifiedViewStorageConfig().getRemoteTimelineClientTimeoutSecs())
-        .withRemoteTimelineClientRetry(writeConfig.getClientSpecifiedViewStorageConfig().isRemoteTimelineClientRetryEnabled())
-        .withRemoteTimelineClientMaxRetryNumbers(writeConfig.getClientSpecifiedViewStorageConfig().getRemoteTimelineClientMaxRetryNumbers())
-        .withRemoteTimelineInitialRetryIntervalMs(writeConfig.getClientSpecifiedViewStorageConfig().getRemoteTimelineInitialRetryIntervalMs())
-        .withRemoteTimelineClientMaxRetryIntervalMs(writeConfig.getClientSpecifiedViewStorageConfig().getRemoteTimelineClientMaxRetryIntervalMs())
-        .withRemoteTimelineClientRetryExceptions(writeConfig.getClientSpecifiedViewStorageConfig().getRemoteTimelineClientRetryExceptions())
+        .withRemoteTimelineClientTimeoutSecs(clientWriteConfig.getClientSpecifiedViewStorageConfig().getRemoteTimelineClientTimeoutSecs())
+        .withRemoteTimelineClientRetry(clientWriteConfig.getClientSpecifiedViewStorageConfig().isRemoteTimelineClientRetryEnabled())
+        .withRemoteTimelineClientMaxRetryNumbers(clientWriteConfig.getClientSpecifiedViewStorageConfig().getRemoteTimelineClientMaxRetryNumbers())
+        .withRemoteTimelineInitialRetryIntervalMs(clientWriteConfig.getClientSpecifiedViewStorageConfig().getRemoteTimelineInitialRetryIntervalMs())
+        .withRemoteTimelineClientMaxRetryIntervalMs(clientWriteConfig.getClientSpecifiedViewStorageConfig().getRemoteTimelineClientMaxRetryIntervalMs())
+        .withRemoteTimelineClientRetryExceptions(clientWriteConfig.getClientSpecifiedViewStorageConfig().getRemoteTimelineClientRetryExceptions())
         .build();
   }
 

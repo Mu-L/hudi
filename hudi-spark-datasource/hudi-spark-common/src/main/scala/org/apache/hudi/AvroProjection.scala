@@ -19,9 +19,10 @@
 
 package org.apache.hudi
 
+import org.apache.hudi.avro.HoodieAvroUtils.rewriteRecordWithNewSchema
+
 import org.apache.avro.Schema
 import org.apache.avro.generic.GenericRecord
-import org.apache.hudi.avro.HoodieAvroUtils.rewriteRecordWithNewSchema
 
 abstract class AvroProjection extends (GenericRecord => GenericRecord)
 
@@ -33,14 +34,10 @@ object AvroProjection {
    */
   def create(schema: Schema): AvroProjection = {
     val projection = (record: GenericRecord) => rewriteRecordWithNewSchema(record, schema)
-    // NOTE: Have to use explicit [[Projection]] instantiation to stay compatible w/ Scala 2.11
-    new AvroProjection {
-      override def apply(record: GenericRecord): GenericRecord =
-        if (record.getSchema == schema) {
-          record
-        } else {
-          projection(record)
-        }
+    (record: GenericRecord) => if (record.getSchema == schema) {
+      record
+    } else {
+      projection(record)
     }
   }
 

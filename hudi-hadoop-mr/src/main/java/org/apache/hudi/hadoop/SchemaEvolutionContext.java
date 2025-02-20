@@ -26,6 +26,9 @@ import org.apache.hudi.common.util.Option;
 import org.apache.hudi.common.util.StringUtils;
 import org.apache.hudi.common.util.TablePathUtils;
 import org.apache.hudi.exception.HoodieException;
+import org.apache.hudi.exception.HoodieValidationException;
+import org.apache.hudi.hadoop.fs.HadoopFSUtils;
+import org.apache.hudi.hadoop.hive.HoodieCombineHiveInputFormat;
 import org.apache.hudi.hadoop.realtime.AbstractRealtimeRecordReader;
 import org.apache.hudi.hadoop.realtime.RealtimeSplit;
 import org.apache.hudi.hadoop.utils.HoodieRealtimeRecordReaderUtils;
@@ -35,6 +38,10 @@ import org.apache.hudi.internal.schema.Types;
 import org.apache.hudi.internal.schema.action.InternalSchemaMerger;
 import org.apache.hudi.internal.schema.convert.AvroInternalSchemaConverter;
 import org.apache.hudi.internal.schema.utils.InternalSchemaUtils;
+import org.apache.hudi.internal.schema.utils.SerDeHelper;
+import org.apache.hudi.storage.HoodieStorage;
+import org.apache.hudi.storage.StoragePath;
+import org.apache.hudi.storage.hadoop.HoodieHadoopStorage;
 
 import org.apache.avro.Schema;
 import org.apache.hadoop.fs.FileSystem;
@@ -59,13 +66,18 @@ import org.apache.hadoop.mapred.JobConf;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
+import javax.annotation.Nullable;
+
 import java.io.IOException;
 import java.util.ArrayList;
 import java.util.Arrays;
 import java.util.LinkedList;
 import java.util.List;
 import java.util.Map;
+import java.util.function.Function;
 import java.util.stream.Collectors;
+
+import static org.apache.hudi.hadoop.fs.HadoopFSUtils.convertToStoragePath;
 
 /**
  * This class is responsible for calculating names and types of fields that are actual at a certain point in time for hive.
@@ -92,29 +104,84 @@ public class SchemaEvolutionContext {
   public SchemaEvolutionContext(InputSplit split, JobConf job, Option<HoodieTableMetaClient> metaClientOption) throws IOException {
     this.split = split;
     this.job = job;
-    this.metaClient = metaClientOption.isPresent() ? metaClientOption.get() : setUpHoodieTableMetaClient();
-    if (this.metaClient == null) {
+    if (!job.getBoolean(HIVE_EVOLUTION_ENABLE, true)) {
+      LOG.info("Schema evolution is disabled for split: {}", split);
       internalSchemaOption = Option.empty();
+      this.metaClient = null;
       return;
     }
-    try {
-      TableSchemaResolver schemaUtil = new TableSchemaResolver(metaClient);
-      this.internalSchemaOption = schemaUtil.getTableInternalSchemaFromCommitMetadata();
-    } catch (Exception e) {
-      internalSchemaOption = Option.empty();
-      LOG.warn(String.format("failed to get internal Schema from hudi table：%s", metaClient.getBasePathV2()), e);
-    }
-    LOG.info(String.format("finish init schema evolution for split: %s", split));
+    this.metaClient = metaClientOption.isPresent() ? metaClientOption.get() : setUpHoodieTableMetaClient();
+    this.internalSchemaOption = getInternalSchemaFromCache();
   }
 
-  private HoodieTableMetaClient setUpHoodieTableMetaClient() throws IOException {
+  public Option<InternalSchema> getInternalSchemaFromCache() throws IOException {
+    Option<InternalSchema> internalSchemaOpt = getCachedData(
+        HoodieCombineHiveInputFormat.INTERNAL_SCHEMA_CACHE_KEY_PREFIX,
+        SerDeHelper::fromJson);
+    if (internalSchemaOpt == null) {
+      // the code path should only be invoked in tests.
+      return new TableSchemaResolver(this.metaClient).getTableInternalSchemaFromCommitMetadata();
+    }
+    return internalSchemaOpt;
+  }
+
+  public Schema getAvroSchemaFromCache() throws Exception {
+    Option<Schema> avroSchemaOpt = getCachedData(
+        HoodieCombineHiveInputFormat.SCHEMA_CACHE_KEY_PREFIX,
+        json -> Option.ofNullable(new Schema.Parser().parse(json)));
+    if (avroSchemaOpt == null) {
+      // the code path should only be invoked in tests.
+      return new TableSchemaResolver(this.metaClient).getTableAvroSchema();
+    }
+    return avroSchemaOpt.orElseThrow(() -> new HoodieValidationException("The avro schema cache should always be set up together with the internal schema cache"));
+  }
+
+  /**
+   * Returns the cache data with given key or null if the cache was never set up.
+   */
+  @Nullable
+  private <T> Option<T> getCachedData(String keyPrefix, Function<String, Option<T>> parser) throws IOException {
+    Option<StoragePath> tablePath = getTablePath(job, split);
+    if (!tablePath.isPresent()) {
+      return Option.empty();
+    }
+    String cacheKey = keyPrefix + "." + tablePath.get().toUri();
+    String cachedJson = job.get(cacheKey);
+    if (cachedJson == null) {
+      // the code path should only be invoked in tests.
+      return null;
+    }
+    if (cachedJson.isEmpty()) {
+      return Option.empty();
+    }
     try {
-      Path inputPath = ((FileSplit)split).getPath();
-      FileSystem fs =  inputPath.getFileSystem(job);
-      Option<Path> tablePath = TablePathUtils.getTablePath(fs, inputPath);
-      return HoodieTableMetaClient.builder().setBasePath(tablePath.get().toString()).setConf(job).build();
+      return parser.apply(cachedJson);
     } catch (Exception e) {
-      LOG.warn(String.format("Not a valid hoodie table, table path: %s", ((FileSplit)split).getPath()), e);
+      LOG.warn("Failed to parse data from cache with key: {}", cacheKey, e);
+      return Option.empty();
+    }
+  }
+
+  private Option<StoragePath> getTablePath(JobConf job, InputSplit split) throws IOException {
+    if (split instanceof FileSplit) {
+      Path path = ((FileSplit) split).getPath();
+      FileSystem fs = path.getFileSystem(job);
+      HoodieStorage storage = new HoodieHadoopStorage(fs);
+      return TablePathUtils.getTablePath(storage, HadoopFSUtils.convertToStoragePath(path));
+    }
+    return Option.empty();
+  }
+
+  private HoodieTableMetaClient setUpHoodieTableMetaClient() {
+    try {
+      Path inputPath = ((FileSplit) split).getPath();
+      FileSystem fs = inputPath.getFileSystem(job);
+      HoodieStorage storage = new HoodieHadoopStorage(fs);
+      Option<StoragePath> tablePath = TablePathUtils.getTablePath(storage, convertToStoragePath(inputPath));
+      return HoodieTableMetaClient.builder().setBasePath(tablePath.get().toString())
+          .setConf(HadoopFSUtils.getStorageConfWithCopy(job)).build();
+    } catch (Exception e) {
+      LOG.warn(String.format("Not a valid hoodie table, table path: %s", ((FileSplit) split).getPath()), e);
       return null;
     }
   }
@@ -127,17 +194,17 @@ public class SchemaEvolutionContext {
    */
   public void doEvolutionForRealtimeInputFormat(AbstractRealtimeRecordReader realtimeRecordReader) throws Exception {
     if (!(split instanceof RealtimeSplit)) {
-      LOG.warn(String.format("expect realtime split for mor table, but find other type split %s", split));
+      LOG.warn("expect realtime split for mor table, but find other type split {}", split);
       return;
     }
     if (internalSchemaOption.isPresent()) {
-      Schema tableAvroSchema = new TableSchemaResolver(metaClient).getTableAvroSchema();
+      Schema tableAvroSchema = getAvroSchemaFromCache();
       List<String> requiredColumns = getRequireColumn(job);
       InternalSchema prunedInternalSchema = InternalSchemaUtils.pruneInternalSchema(internalSchemaOption.get(),
           requiredColumns);
       // Add partitioning fields to writer schema for resulting row to contain null values for these fields
       String partitionFields = job.get(hive_metastoreConstants.META_TABLE_PARTITION_COLUMNS, "");
-      List<String> partitioningFields = partitionFields.length() > 0 ? Arrays.stream(partitionFields.split("/")).collect(Collectors.toList())
+      List<String> partitioningFields = !partitionFields.isEmpty() ? Arrays.stream(partitionFields.split("/")).collect(Collectors.toList())
           : new ArrayList<>();
       Schema writerSchema = AvroInternalSchemaConverter.convert(internalSchemaOption.get(), tableAvroSchema.getName());
       writerSchema = HoodieRealtimeRecordReaderUtils.addPartitionFields(writerSchema, partitioningFields);
@@ -151,8 +218,8 @@ public class SchemaEvolutionContext {
       realtimeRecordReader.setHiveSchema(hiveSchema);
       internalSchemaOption = Option.of(prunedInternalSchema);
       RealtimeSplit realtimeSplit = (RealtimeSplit) split;
-      LOG.info(String.format("About to read compacted logs %s for base split %s, projecting cols %s",
-          realtimeSplit.getDeltaLogPaths(), realtimeSplit.getPath(), requiredColumns));
+      LOG.info("About to read compacted logs {} for base split {}, projecting cols {}",
+          realtimeSplit.getDeltaLogPaths(), realtimeSplit.getPath(), requiredColumns);
     }
   }
 
@@ -163,7 +230,7 @@ public class SchemaEvolutionContext {
     if (internalSchemaOption.isPresent()) {
       // reading hoodie schema evolution table
       job.setBoolean(HIVE_EVOLUTION_ENABLE, true);
-      Path finalPath = ((FileSplit)split).getPath();
+      Path finalPath = ((FileSplit) split).getPath();
       InternalSchema prunedSchema;
       List<String> requiredColumns = getRequireColumn(job);
       // No need trigger schema evolution for count(*)/count(1) operation
@@ -173,7 +240,7 @@ public class SchemaEvolutionContext {
         prunedSchema = InternalSchemaUtils.pruneInternalSchema(internalSchemaOption.get(), requiredColumns);
         InternalSchema querySchema = prunedSchema;
         long commitTime = Long.parseLong(FSUtils.getCommitTime(finalPath.getName()));
-        InternalSchema fileSchema = InternalSchemaCache.searchSchemaAndCache(commitTime, metaClient, false);
+        InternalSchema fileSchema = InternalSchemaCache.searchSchemaAndCache(commitTime, metaClient);
         InternalSchema mergedInternalSchema = new InternalSchemaMerger(fileSchema, querySchema, true,
             true).mergeSchema();
         List<Types.Field> fields = mergedInternalSchema.columns();
@@ -215,12 +282,12 @@ public class SchemaEvolutionContext {
   private TypeInfo constructHiveSchemaFromType(Type type, TypeInfo typeInfo) {
     switch (type.typeId()) {
       case RECORD:
-        Types.RecordType record = (Types.RecordType)type;
+        Types.RecordType record = (Types.RecordType) type;
         List<Types.Field> fields = record.fields();
-        ArrayList<TypeInfo>  fieldTypes = new ArrayList<>();
-        ArrayList<String>  fieldNames = new ArrayList<>();
+        ArrayList<TypeInfo> fieldTypes = new ArrayList<>();
+        ArrayList<String> fieldNames = new ArrayList<>();
         for (int index = 0; index < fields.size(); index++) {
-          StructTypeInfo structTypeInfo = (StructTypeInfo)typeInfo;
+          StructTypeInfo structTypeInfo = (StructTypeInfo) typeInfo;
           TypeInfo subTypeInfo = getSchemaSubTypeInfo(structTypeInfo.getAllStructFieldTypeInfos().get(index), fields.get(index).type());
           fieldTypes.add(subTypeInfo);
           String name = fields.get(index).name();
@@ -231,14 +298,14 @@ public class SchemaEvolutionContext {
         structTypeInfo.setAllStructFieldTypeInfos(fieldTypes);
         return structTypeInfo;
       case ARRAY:
-        ListTypeInfo listTypeInfo = (ListTypeInfo)typeInfo;
+        ListTypeInfo listTypeInfo = (ListTypeInfo) typeInfo;
         Types.ArrayType array = (Types.ArrayType) type;
         TypeInfo subTypeInfo = getSchemaSubTypeInfo(listTypeInfo.getListElementTypeInfo(), array.elementType());
         listTypeInfo.setListElementTypeInfo(subTypeInfo);
         return listTypeInfo;
       case MAP:
-        Types.MapType map = (Types.MapType)type;
-        MapTypeInfo mapTypeInfo = (MapTypeInfo)typeInfo;
+        Types.MapType map = (Types.MapType) type;
+        MapTypeInfo mapTypeInfo = (MapTypeInfo) typeInfo;
         TypeInfo keyType = getSchemaSubTypeInfo(mapTypeInfo.getMapKeyTypeInfo(), map.keyType());
         TypeInfo valueType = getSchemaSubTypeInfo(mapTypeInfo.getMapValueTypeInfo(), map.valueType());
         MapTypeInfo mapType = new MapTypeInfo();
@@ -261,7 +328,7 @@ public class SchemaEvolutionContext {
       case TIME:
         throw new UnsupportedOperationException(String.format("cannot convert %s type to hive", type));
       default:
-        LOG.error(String.format("cannot convert unknown type: %s to Hive", type));
+        LOG.error("cannot convert unknown type: {} to Hive", type);
         throw new UnsupportedOperationException(String.format("cannot convert unknown type: %s to Hive", type));
     }
   }
@@ -288,9 +355,9 @@ public class SchemaEvolutionContext {
         for (int i = 0; i < size; i++) {
           ExprNodeDesc expr = exprNodes.poll();
           if (expr instanceof ExprNodeColumnDesc) {
-            String oldColumn = ((ExprNodeColumnDesc)expr).getColumn();
+            String oldColumn = ((ExprNodeColumnDesc) expr).getColumn();
             String newColumn = InternalSchemaUtils.reBuildFilterName(oldColumn, fileSchema, querySchema);
-            ((ExprNodeColumnDesc)expr).setColumn(newColumn);
+            ((ExprNodeColumnDesc) expr).setColumn(newColumn);
           }
           List<ExprNodeDesc> children = expr.getChildren();
           if (children != null) {
@@ -301,8 +368,8 @@ public class SchemaEvolutionContext {
       String filterText = filterExpr.getExprString();
       String serializedFilterExpr = SerializationUtilities.serializeExpression(filterExpr);
       if (LOG.isDebugEnabled()) {
-        LOG.debug("Pushdown initiated with filterText = " + filterText + ", filterExpr = "
-            + filterExpr + ", serializedFilterExpr = " + serializedFilterExpr);
+        LOG.debug("Pushdown initiated with filterText = {}, filterExpr = {}, serializedFilterExpr = {}",
+            filterText, filterExpr, serializedFilterExpr);
       }
       job.set(TableScanDesc.FILTER_TEXT_CONF_STR, filterText);
       job.set(TableScanDesc.FILTER_EXPR_CONF_STR, serializedFilterExpr);
@@ -319,7 +386,7 @@ public class SchemaEvolutionContext {
     }
     StringBuilder readColumnNames = new StringBuilder();
     List<String> tmpColNameList = Arrays.asList(job.get(serdeConstants.LIST_COLUMNS).split(","));
-    List<String> fullColNamelist = new ArrayList<String>(tmpColNameList);
+    List<String> fullColNamelist = new ArrayList<>(tmpColNameList);
     for (int index = 0; index < fields.size(); index++) {
       String colName = fields.get(index).name();
       if (readColumnNames.length() > 0) {

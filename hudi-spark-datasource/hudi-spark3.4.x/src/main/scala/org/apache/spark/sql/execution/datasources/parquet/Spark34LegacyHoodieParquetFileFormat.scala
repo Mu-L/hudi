@@ -17,19 +17,22 @@
 
 package org.apache.spark.sql.execution.datasources.parquet
 
-import org.apache.hadoop.conf.Configuration
-import org.apache.hadoop.mapred.FileSplit
-import org.apache.hadoop.mapreduce.task.TaskAttemptContextImpl
-import org.apache.hadoop.mapreduce.{JobID, TaskAttemptID, TaskID, TaskType}
-import org.apache.hudi.HoodieSparkUtils
 import org.apache.hudi.client.utils.SparkInternalSchemaConverter
 import org.apache.hudi.common.fs.FSUtils
+import org.apache.hudi.common.table.timeline.TimelineLayout
+import org.apache.hudi.common.table.timeline.versioning.TimelineLayoutVersion
 import org.apache.hudi.common.util.InternalSchemaCache
 import org.apache.hudi.common.util.StringUtils.isNullOrEmpty
 import org.apache.hudi.common.util.collection.Pair
 import org.apache.hudi.internal.schema.InternalSchema
 import org.apache.hudi.internal.schema.action.InternalSchemaMerger
 import org.apache.hudi.internal.schema.utils.{InternalSchemaUtils, SerDeHelper}
+import org.apache.hudi.storage.hadoop.HoodieHadoopStorage
+
+import org.apache.hadoop.conf.Configuration
+import org.apache.hadoop.mapred.FileSplit
+import org.apache.hadoop.mapreduce.{JobID, TaskAttemptID, TaskID, TaskType}
+import org.apache.hadoop.mapreduce.task.TaskAttemptContextImpl
 import org.apache.parquet.filter2.compat.FilterCompat
 import org.apache.parquet.filter2.predicate.FilterApi
 import org.apache.parquet.format.converter.ParquetMetadataConverter.SKIP_ROW_GROUPS
@@ -37,12 +40,12 @@ import org.apache.parquet.hadoop.{ParquetInputFormat, ParquetRecordReader}
 import org.apache.spark.TaskContext
 import org.apache.spark.sql.SparkSession
 import org.apache.spark.sql.catalyst.InternalRow
-import org.apache.spark.sql.catalyst.expressions.codegen.GenerateUnsafeProjection
 import org.apache.spark.sql.catalyst.expressions.{Cast, JoinedRow}
+import org.apache.spark.sql.catalyst.expressions.codegen.GenerateUnsafeProjection
 import org.apache.spark.sql.catalyst.util.DateTimeUtils
 import org.apache.spark.sql.execution.WholeStageCodegenExec
-import org.apache.spark.sql.execution.datasources.parquet.Spark34LegacyHoodieParquetFileFormat._
 import org.apache.spark.sql.execution.datasources.{DataSourceUtils, PartitionedFile, RecordReaderIterator}
+import org.apache.spark.sql.execution.datasources.parquet.Spark34LegacyHoodieParquetFileFormat._
 import org.apache.spark.sql.internal.SQLConf
 import org.apache.spark.sql.sources._
 import org.apache.spark.sql.types.{AtomicType, DataType, StructField, StructType}
@@ -171,7 +174,12 @@ class Spark34LegacyHoodieParquetFileFormat(private val shouldAppendPartitionValu
       val fileSchema = if (shouldUseInternalSchema) {
         val commitInstantTime = FSUtils.getCommitTime(filePath.getName).toLong;
         val validCommits = sharedConf.get(SparkInternalSchemaConverter.HOODIE_VALID_COMMITS_LIST)
-        InternalSchemaCache.getInternalSchemaByVersionId(commitInstantTime, tablePath, sharedConf, if (validCommits == null) "" else validCommits)
+        //TODO: HARDCODED TIMELINE OBJECT
+        val layout = TimelineLayout.fromVersion(TimelineLayoutVersion.CURR_LAYOUT_VERSION)
+        val storage = new HoodieHadoopStorage(tablePath, sharedConf)
+        InternalSchemaCache.getInternalSchemaByVersionId(commitInstantTime, tablePath, storage,
+          if (validCommits == null) "" else validCommits,
+          layout.getInstantFileNameParser, layout.getCommitMetadataSerDe, layout.getInstantGenerator)
       } else {
         null
       }
@@ -181,35 +189,17 @@ class Spark34LegacyHoodieParquetFileFormat(private val shouldAppendPartitionValu
       // Try to push down filters when filter push-down is enabled.
       val pushed = if (enableParquetFilterPushDown) {
         val parquetSchema = footerFileMetaData.getSchema
-        val parquetFilters = if (HoodieSparkUtils.gteqSpark3_2_1) {
-          // NOTE: Below code could only be compiled against >= Spark 3.2.1,
-          //       and unfortunately won't compile against Spark 3.2.0
-          //       However this code is runtime-compatible w/ both Spark 3.2.0 and >= Spark 3.2.1
-          val datetimeRebaseSpec =
+        val datetimeRebaseSpec =
           DataSourceUtils.datetimeRebaseSpec(footerFileMetaData.getKeyValueMetaData.get, datetimeRebaseModeInRead)
-          new ParquetFilters(
-            parquetSchema,
-            pushDownDate,
-            pushDownTimestamp,
-            pushDownDecimal,
-            pushDownStringStartWith,
-            pushDownInFilterThreshold,
-            isCaseSensitive,
-            datetimeRebaseSpec)
-        } else {
-          // Spark 3.2.0
-          val datetimeRebaseMode =
-            Spark34DataSourceUtils.datetimeRebaseMode(footerFileMetaData.getKeyValueMetaData.get, datetimeRebaseModeInRead)
-          createParquetFilters(
-            parquetSchema,
-            pushDownDate,
-            pushDownTimestamp,
-            pushDownDecimal,
-            pushDownStringStartWith,
-            pushDownInFilterThreshold,
-            isCaseSensitive,
-            datetimeRebaseMode)
-        }
+        val parquetFilters = new ParquetFilters(
+          parquetSchema,
+          pushDownDate,
+          pushDownTimestamp,
+          pushDownDecimal,
+          pushDownStringStartWith,
+          pushDownInFilterThreshold,
+          isCaseSensitive,
+          datetimeRebaseSpec)
         filters.map(rebuildFilterFromParquet(_, fileSchema, querySchemaOption.orElse(null)))
           // Collects all converted Parquet filter predicates. Notice that not all predicates can be
           // converted (`ParquetFilters.createFilter` returns an `Option`). That's why a `flatMap`
@@ -278,7 +268,7 @@ class Spark34LegacyHoodieParquetFileFormat(private val shouldAppendPartitionValu
               DataSourceUtils.int96RebaseSpec(footerFileMetaData.getKeyValueMetaData.get, int96RebaseModeInRead)
             val datetimeRebaseSpec =
               DataSourceUtils.datetimeRebaseSpec(footerFileMetaData.getKeyValueMetaData.get, datetimeRebaseModeInRead)
-            new Spark32PlusHoodieVectorizedParquetRecordReader(
+            new Spark3HoodieVectorizedParquetRecordReader(
               convertTz.orNull,
               datetimeRebaseSpec.mode.toString,
               datetimeRebaseSpec.timeZone,
@@ -287,10 +277,7 @@ class Spark34LegacyHoodieParquetFileFormat(private val shouldAppendPartitionValu
               enableOffHeapColumnVector && taskContext.isDefined,
               capacity,
               typeChangeInfos)
-          } else if (HoodieSparkUtils.gteqSpark3_2_1) {
-            // NOTE: Below code could only be compiled against >= Spark 3.2.1,
-            //       and unfortunately won't compile against Spark 3.2.0
-            //       However this code is runtime-compatible w/ both Spark 3.2.0 and >= Spark 3.2.1
+          } else {
             val int96RebaseSpec =
             DataSourceUtils.int96RebaseSpec(footerFileMetaData.getKeyValueMetaData.get, int96RebaseModeInRead)
             val datetimeRebaseSpec =
@@ -301,18 +288,6 @@ class Spark34LegacyHoodieParquetFileFormat(private val shouldAppendPartitionValu
               datetimeRebaseSpec.timeZone,
               int96RebaseSpec.mode.toString,
               int96RebaseSpec.timeZone,
-              enableOffHeapColumnVector && taskContext.isDefined,
-              capacity)
-          } else {
-            // Spark 3.2.0
-            val datetimeRebaseMode =
-              Spark34DataSourceUtils.datetimeRebaseMode(footerFileMetaData.getKeyValueMetaData.get, datetimeRebaseModeInRead)
-            val int96RebaseMode =
-              Spark34DataSourceUtils.int96RebaseMode(footerFileMetaData.getKeyValueMetaData.get, int96RebaseModeInRead)
-            createVectorizedParquetRecordReader(
-              convertTz.orNull,
-              datetimeRebaseMode.toString,
-              int96RebaseMode.toString,
               enableOffHeapColumnVector && taskContext.isDefined,
               capacity)
           }
@@ -352,31 +327,15 @@ class Spark34LegacyHoodieParquetFileFormat(private val shouldAppendPartitionValu
         }
       } else {
         logDebug(s"Falling back to parquet-mr")
-        val readSupport = if (HoodieSparkUtils.gteqSpark3_2_1) {
-          // ParquetRecordReader returns InternalRow
-          // NOTE: Below code could only be compiled against >= Spark 3.2.1,
-          //       and unfortunately won't compile against Spark 3.2.0
-          //       However this code is runtime-compatible w/ both Spark 3.2.0 and >= Spark 3.2.1
-          val int96RebaseSpec =
+        val int96RebaseSpec =
           DataSourceUtils.int96RebaseSpec(footerFileMetaData.getKeyValueMetaData.get, int96RebaseModeInRead)
-          val datetimeRebaseSpec =
-            DataSourceUtils.datetimeRebaseSpec(footerFileMetaData.getKeyValueMetaData.get, datetimeRebaseModeInRead)
-          new ParquetReadSupport(
-            convertTz,
-            enableVectorizedReader = false,
-            datetimeRebaseSpec,
-            int96RebaseSpec)
-        } else {
-          val datetimeRebaseMode =
-            Spark34DataSourceUtils.datetimeRebaseMode(footerFileMetaData.getKeyValueMetaData.get, datetimeRebaseModeInRead)
-          val int96RebaseMode =
-            Spark34DataSourceUtils.int96RebaseMode(footerFileMetaData.getKeyValueMetaData.get, int96RebaseModeInRead)
-          createParquetReadSupport(
-            convertTz,
-            /* enableVectorizedReader = */ false,
-            datetimeRebaseMode,
-            int96RebaseMode)
-        }
+        val datetimeRebaseSpec =
+          DataSourceUtils.datetimeRebaseSpec(footerFileMetaData.getKeyValueMetaData.get, datetimeRebaseModeInRead)
+        val readSupport = new ParquetReadSupport(
+          convertTz,
+          enableVectorizedReader = false,
+          datetimeRebaseSpec,
+          int96RebaseSpec)
 
         val reader = if (pushed.isDefined && enableRecordFilter) {
           val parquetFilter = FilterCompat.get(pushed.get, null)
@@ -431,42 +390,6 @@ class Spark34LegacyHoodieParquetFileFormat(private val shouldAppendPartitionValu
 }
 
 object Spark34LegacyHoodieParquetFileFormat {
-
-  /**
-   * NOTE: This method is specific to Spark 3.2.0
-   */
-  private def createParquetFilters(args: Any*): ParquetFilters = {
-    // NOTE: ParquetFilters ctor args contain Scala enum, therefore we can't look it
-    //       up by arg types, and have to instead rely on the number of args based on individual class;
-    //       the ctor order is not guaranteed
-    val ctor = classOf[ParquetFilters].getConstructors.maxBy(_.getParameterCount)
-    ctor.newInstance(args.map(_.asInstanceOf[AnyRef]): _*)
-      .asInstanceOf[ParquetFilters]
-  }
-
-  /**
-   * NOTE: This method is specific to Spark 3.2.0
-   */
-  private def createParquetReadSupport(args: Any*): ParquetReadSupport = {
-    // NOTE: ParquetReadSupport ctor args contain Scala enum, therefore we can't look it
-    //       up by arg types, and have to instead rely on the number of args based on individual class;
-    //       the ctor order is not guaranteed
-    val ctor = classOf[ParquetReadSupport].getConstructors.maxBy(_.getParameterCount)
-    ctor.newInstance(args.map(_.asInstanceOf[AnyRef]): _*)
-      .asInstanceOf[ParquetReadSupport]
-  }
-
-  /**
-   * NOTE: This method is specific to Spark 3.2.0
-   */
-  private def createVectorizedParquetRecordReader(args: Any*): VectorizedParquetRecordReader = {
-    // NOTE: ParquetReadSupport ctor args contain Scala enum, therefore we can't look it
-    //       up by arg types, and have to instead rely on the number of args based on individual class;
-    //       the ctor order is not guaranteed
-    val ctor = classOf[VectorizedParquetRecordReader].getConstructors.maxBy(_.getParameterCount)
-    ctor.newInstance(args.map(_.asInstanceOf[AnyRef]): _*)
-      .asInstanceOf[VectorizedParquetRecordReader]
-  }
 
   def pruneInternalSchema(internalSchemaStr: String, requiredSchema: StructType): String = {
     val querySchemaOption = SerDeHelper.fromJson(internalSchemaStr)

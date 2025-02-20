@@ -25,7 +25,9 @@ import java.nio.ByteBuffer;
 import java.nio.charset.StandardCharsets;
 import java.util.Collections;
 import java.util.List;
+import java.util.Map;
 import java.util.stream.Collectors;
+import java.util.stream.IntStream;
 import java.util.stream.Stream;
 
 /**
@@ -88,6 +90,12 @@ public class StringUtils {
       return null;
     }
     return String.join(separator, list.toArray(new String[0]));
+  }
+
+  public static <K, V> String join(final Map<K, V> map) {
+    return map.entrySet().stream()
+        .map(e -> e.getKey() + "=" + e.getValue())
+        .collect(Collectors.joining(", ", "{", "}"));
   }
 
   public static String toHexString(byte[] bytes) {
@@ -301,5 +309,130 @@ public class StringUtils {
     }
     buf.append(text.substring(start));
     return buf.toString();
+  }
+
+  /**
+   * Strips given characters from end of the string and returns the result
+   * @param str - string to be stripped
+   * @param stripChars - characters to strip
+   */
+  public static String stripEnd(final String str, final String stripChars) {
+    int end;
+    if (str == null || (end = str.length()) == 0) {
+      return str;
+    }
+
+    if (stripChars == null) {
+      while (end != 0 && Character.isWhitespace(str.charAt(end - 1))) {
+        end--;
+      }
+    } else if (stripChars.isEmpty()) {
+      return str;
+    } else {
+      while (end != 0 && stripChars.indexOf(str.charAt(end - 1)) != INDEX_NOT_FOUND) {
+        end--;
+      }
+    }
+    return str.substring(0, end);
+  }
+
+  /**
+   * Concatenates two strings such that the total byte length does not exceed the threshold.
+   * If the total byte length exceeds the threshold, the function will find the maximum length of the first string
+   * that fits within the threshold and concatenate that with the second string.
+   *
+   * @param a         The first string
+   * @param b         The second string
+   * @param byteLengthThreshold The maximum byte length
+   */
+  public static String concatenateWithThreshold(String a, String b, int byteLengthThreshold) {
+    // Convert both strings to byte arrays in UTF-8 encoding
+    byte[] bytesA = getUTF8Bytes(a);
+    byte[] bytesB = getUTF8Bytes(b);
+    if (bytesB.length > byteLengthThreshold) {
+      throw new IllegalArgumentException(String.format(
+          "Length of the Second string to concatenate exceeds the threshold (%d > %d)",
+          bytesB.length, byteLengthThreshold));
+    }
+
+    // Calculate total bytes
+    int totalBytes = bytesA.length + bytesB.length;
+
+    // If total bytes is within the threshold, return concatenated string
+    if (totalBytes <= byteLengthThreshold) {
+      return a + b;
+    }
+
+    // Calculate the maximum bytes 'a' can take
+    int bestLength = getBestLength(a, byteLengthThreshold - bytesB.length);
+
+    // Concatenate the valid substring of 'a' with 'b'
+    return a.substring(0, bestLength) + b;
+  }
+
+  /**
+   * Concatenates the string representation of each object in the list
+   * and returns a single string. The result is capped at "lengthThreshold" characters.
+   *
+   * @param objectList      object list
+   * @param lengthThreshold number of characters to cap the string
+   * @return capped string representation of the object list
+   * @param <T> type of the object
+   */
+  public static <T> String toStringWithThreshold(List<T> objectList, int lengthThreshold) {
+    if (objectList == null || objectList.isEmpty()) {
+      return "";
+    }
+    StringBuilder sb = new StringBuilder();
+
+    for (Object obj : objectList) {
+      if (sb.length() >= lengthThreshold) {
+        setLastThreeDots(sb);
+        break;
+      }
+
+      String objString = (sb.length() > 0 ? "," : "") + obj;
+
+      // Check if appending this string would exceed the limit
+      if (sb.length() + objString.length() > lengthThreshold) {
+        int remaining = lengthThreshold - sb.length();
+        sb.append(objString, 0, remaining);
+        setLastThreeDots(sb);
+        break;
+      } else {
+        sb.append(objString);
+      }
+    }
+
+    return sb.toString();
+  }
+
+  private static void setLastThreeDots(StringBuilder sb) {
+    IntStream.range(1, 4).forEach(i -> {
+      int loc = sb.length() - i;
+      if (loc >= 0) {
+        sb.setCharAt(loc, '.');
+      }
+    });
+  }
+
+  private static int getBestLength(String a, int threshold) {
+    // Binary search to find the maximum length of substring of 'a' that fits within maxBytesForA
+    int low = 0;
+    int high = Math.min(a.length(), threshold);
+    int bestLength = 0;
+
+    while (low <= high) {
+      int mid = (low + high) / 2;
+      byte[] subABytes = getUTF8Bytes(a.substring(0, mid));
+
+      if (subABytes.length <= threshold) {
+        bestLength = mid;
+        low = mid + 1;
+      } else {
+        high = mid - 1;
+      }
+    }
+    return bestLength;
   }
 }

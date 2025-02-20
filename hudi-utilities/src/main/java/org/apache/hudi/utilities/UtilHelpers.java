@@ -25,6 +25,7 @@ import org.apache.hudi.client.WriteStatus;
 import org.apache.hudi.client.common.HoodieSparkEngineContext;
 import org.apache.hudi.client.transaction.lock.FileSystemBasedLockProvider;
 import org.apache.hudi.common.config.DFSPropertiesConfiguration;
+import org.apache.hudi.common.config.HoodieCommonConfig;
 import org.apache.hudi.common.config.TypedProperties;
 import org.apache.hudi.common.engine.EngineType;
 import org.apache.hudi.common.fs.FSUtils;
@@ -40,15 +41,20 @@ import org.apache.hudi.common.util.Option;
 import org.apache.hudi.common.util.ReflectionUtils;
 import org.apache.hudi.common.util.StringUtils;
 import org.apache.hudi.common.util.ValidationUtils;
+import org.apache.hudi.common.util.collection.Pair;
 import org.apache.hudi.config.HoodieCompactionConfig;
 import org.apache.hudi.config.HoodieIndexConfig;
 import org.apache.hudi.config.HoodieLockConfig;
 import org.apache.hudi.config.HoodieWriteConfig;
 import org.apache.hudi.exception.HoodieException;
 import org.apache.hudi.exception.HoodieIOException;
+import org.apache.hudi.hadoop.fs.HadoopFSUtils;
 import org.apache.hudi.index.HoodieIndex;
+import org.apache.hudi.storage.HoodieStorage;
+import org.apache.hudi.storage.StoragePath;
+import org.apache.hudi.storage.StorageSchemes;
+import org.apache.hudi.table.action.compact.strategy.CompactionStrategy;
 import org.apache.hudi.utilities.checkpointing.InitialCheckPointProvider;
-import org.apache.hudi.utilities.config.HoodieSchemaProviderConfig;
 import org.apache.hudi.utilities.config.SchemaProviderPostProcessorConfig;
 import org.apache.hudi.utilities.exception.HoodieSchemaFetchException;
 import org.apache.hudi.utilities.exception.HoodieSchemaPostProcessException;
@@ -60,12 +66,12 @@ import org.apache.hudi.utilities.schema.RowBasedSchemaProvider;
 import org.apache.hudi.utilities.schema.SchemaPostProcessor;
 import org.apache.hudi.utilities.schema.SchemaProvider;
 import org.apache.hudi.utilities.schema.SchemaProviderWithPostProcessor;
-import org.apache.hudi.utilities.schema.SparkAvroPostProcessor;
 import org.apache.hudi.utilities.schema.postprocessor.ChainedSchemaPostProcessor;
 import org.apache.hudi.utilities.sources.InputBatch;
 import org.apache.hudi.utilities.sources.Source;
 import org.apache.hudi.utilities.sources.processor.ChainedJsonKafkaSourcePostProcessor;
 import org.apache.hudi.utilities.sources.processor.JsonKafkaSourcePostProcessor;
+import org.apache.hudi.utilities.streamer.StreamContext;
 import org.apache.hudi.utilities.transform.ChainedTransformer;
 import org.apache.hudi.utilities.transform.ErrorTableAwareChainedTransformer;
 import org.apache.hudi.utilities.transform.Transformer;
@@ -111,8 +117,8 @@ import java.util.Properties;
 import java.util.function.Function;
 import java.util.function.Supplier;
 
-import static org.apache.hudi.common.util.ConfigUtils.getBooleanWithAltKeys;
 import static org.apache.hudi.common.util.ConfigUtils.getStringWithAltKeys;
+import static org.apache.hudi.hadoop.fs.HadoopFSUtils.convertToStoragePath;
 
 /**
  * Bunch of helper methods.
@@ -127,33 +133,36 @@ public class UtilHelpers {
   private static final Logger LOG = LoggerFactory.getLogger(UtilHelpers.class);
 
   public static HoodieRecordMerger createRecordMerger(Properties props) {
-    List<String> recordMergerImplClasses = ConfigUtils.split2List(props.getProperty(HoodieWriteConfig.RECORD_MERGER_IMPLS.key(),
-        HoodieWriteConfig.RECORD_MERGER_IMPLS.defaultValue()));
-    HoodieRecordMerger recordMerger = HoodieRecordUtils.createRecordMerger(null, EngineType.SPARK, recordMergerImplClasses,
-        props.getProperty(HoodieWriteConfig.RECORD_MERGER_STRATEGY.key(), HoodieWriteConfig.RECORD_MERGER_STRATEGY.defaultValue()));
-
-    return recordMerger;
+    return HoodieRecordUtils.createRecordMerger(null, EngineType.SPARK,
+        StringUtils.split(ConfigUtils.getStringWithAltKeys(props, HoodieWriteConfig.RECORD_MERGE_IMPL_CLASSES, null), ","),
+        ConfigUtils.getStringWithAltKeys(props, HoodieWriteConfig.RECORD_MERGE_STRATEGY_ID, null));
   }
 
   public static Source createSource(String sourceClass, TypedProperties cfg, JavaSparkContext jssc,
-      SparkSession sparkSession, SchemaProvider schemaProvider,
-      HoodieIngestionMetrics metrics) throws IOException {
-    try {
+                                    SparkSession sparkSession, HoodieIngestionMetrics metrics, StreamContext streamContext) throws IOException {
+    // All possible constructors.
+    Class<?>[] constructorArgsStreamContextMetrics = new Class<?>[] {TypedProperties.class, JavaSparkContext.class, SparkSession.class, HoodieIngestionMetrics.class, StreamContext.class};
+    Class<?>[] constructorArgsStreamContext = new Class<?>[] {TypedProperties.class, JavaSparkContext.class, SparkSession.class, StreamContext.class};
+    Class<?>[] constructorArgsMetrics = new Class<?>[] {TypedProperties.class, JavaSparkContext.class, SparkSession.class, SchemaProvider.class, HoodieIngestionMetrics.class};
+    Class<?>[] constructorArgs = new Class<?>[] {TypedProperties.class, JavaSparkContext.class, SparkSession.class, SchemaProvider.class};
+    // List of constructor and their respective arguments.
+    List<Pair<Class<?>[], Object[]>> sourceConstructorAndArgs = new ArrayList<>();
+    sourceConstructorAndArgs.add(Pair.of(constructorArgsStreamContextMetrics, new Object[] {cfg, jssc, sparkSession, metrics, streamContext}));
+    sourceConstructorAndArgs.add(Pair.of(constructorArgsStreamContext, new Object[] {cfg, jssc, sparkSession, streamContext}));
+    sourceConstructorAndArgs.add(Pair.of(constructorArgsMetrics, new Object[] {cfg, jssc, sparkSession, streamContext.getSchemaProvider(), metrics}));
+    sourceConstructorAndArgs.add(Pair.of(constructorArgs, new Object[] {cfg, jssc, sparkSession, streamContext.getSchemaProvider()}));
+
+    HoodieException sourceClassLoadException = null;
+    for (Pair<Class<?>[], Object[]> constructor : sourceConstructorAndArgs) {
       try {
-        return (Source) ReflectionUtils.loadClass(sourceClass,
-            new Class<?>[] {TypedProperties.class, JavaSparkContext.class,
-                SparkSession.class, SchemaProvider.class,
-                HoodieIngestionMetrics.class},
-            cfg, jssc, sparkSession, schemaProvider, metrics);
+        return (Source) ReflectionUtils.loadClass(sourceClass, constructor.getLeft(), constructor.getRight());
       } catch (HoodieException e) {
-        return (Source) ReflectionUtils.loadClass(sourceClass,
-            new Class<?>[] {TypedProperties.class, JavaSparkContext.class,
-                SparkSession.class, SchemaProvider.class},
-            cfg, jssc, sparkSession, schemaProvider);
+        sourceClassLoadException = e;
+      } catch (Throwable t) {
+        throw new IOException("Could not load source class " + sourceClass, t);
       }
-    } catch (Throwable e) {
-      throw new IOException("Could not load source class " + sourceClass, e);
     }
+    throw new IOException("Could not load source class " + sourceClass, sourceClassLoadException);
   }
 
   public static JsonKafkaSourcePostProcessor createJsonKafkaSourcePostProcessor(String postProcessorClassNames, TypedProperties props) throws IOException {
@@ -224,18 +233,21 @@ public class UtilHelpers {
   public static InitialCheckPointProvider createInitialCheckpointProvider(
       String className, TypedProperties props) throws IOException {
     try {
-      return (InitialCheckPointProvider) ReflectionUtils.loadClass(className, new Class<?>[]{TypedProperties.class}, props);
+      return (InitialCheckPointProvider) ReflectionUtils.loadClass(className, new Class<?>[] {TypedProperties.class}, props);
     } catch (Throwable e) {
       throw new IOException("Could not load initial checkpoint provider class " + className, e);
     }
   }
 
-  public static DFSPropertiesConfiguration readConfig(Configuration hadoopConfig, Path cfgPath, List<String> overriddenProps) {
-    DFSPropertiesConfiguration conf = new DFSPropertiesConfiguration(hadoopConfig, cfgPath);
+  public static DFSPropertiesConfiguration readConfig(Configuration hadoopConfig,
+                                                      Path cfgPath,
+                                                      List<String> overriddenProps) {
+    StoragePath storagePath = convertToStoragePath(cfgPath);
+    DFSPropertiesConfiguration conf = new DFSPropertiesConfiguration(hadoopConfig, storagePath);
     try {
       if (!overriddenProps.isEmpty()) {
         LOG.info("Adding overridden properties to file properties.");
-        conf.addPropsFromStream(new BufferedReader(new StringReader(String.join("\n", overriddenProps))), cfgPath);
+        conf.addPropsFromStream(new BufferedReader(new StringReader(String.join("\n", overriddenProps))), storagePath);
       }
     } catch (IOException ioe) {
       throw new HoodieIOException("Unexpected error adding config overrides", ioe);
@@ -309,19 +321,19 @@ public class UtilHelpers {
     String master = sparkConf.get("spark.master", defaultMaster);
     sparkConf.setMaster(master);
     if (master.startsWith("yarn")) {
-      sparkConf.set("spark.eventLog.overwrite", "true");
-      sparkConf.set("spark.eventLog.enabled", "true");
+      sparkConf.setIfMissing("spark.eventLog.overwrite", "true");
+      sparkConf.setIfMissing("spark.eventLog.enabled", "true");
     }
-    sparkConf.set("spark.ui.port", "8090");
+    sparkConf.setIfMissing("spark.ui.port", "8090");
     sparkConf.setIfMissing("spark.driver.maxResultSize", "2g");
-    sparkConf.set("spark.serializer", "org.apache.spark.serializer.KryoSerializer");
-    sparkConf.set("spark.kryo.registrator", "org.apache.spark.HoodieSparkKryoRegistrar");
-    sparkConf.set("spark.sql.extensions", "org.apache.spark.sql.hudi.HoodieSparkSessionExtension");
-    sparkConf.set("spark.hadoop.mapred.output.compress", "true");
-    sparkConf.set("spark.hadoop.mapred.output.compression.codec", "true");
-    sparkConf.set("spark.hadoop.mapred.output.compression.codec", "org.apache.hadoop.io.compress.GzipCodec");
-    sparkConf.set("spark.hadoop.mapred.output.compression.type", "BLOCK");
-    sparkConf.set("spark.driver.allowMultipleContexts", "true");
+    sparkConf.setIfMissing("spark.serializer", "org.apache.spark.serializer.KryoSerializer");
+    sparkConf.setIfMissing("spark.kryo.registrator", "org.apache.spark.HoodieSparkKryoRegistrar");
+    sparkConf.setIfMissing("spark.sql.extensions", "org.apache.spark.sql.hudi.HoodieSparkSessionExtension");
+    sparkConf.setIfMissing("spark.hadoop.mapred.output.compress", "true");
+    sparkConf.setIfMissing("spark.hadoop.mapred.output.compression.codec", "true");
+    sparkConf.setIfMissing("spark.hadoop.mapred.output.compression.codec", "org.apache.hadoop.io.compress.GzipCodec");
+    sparkConf.setIfMissing("spark.hadoop.mapred.output.compression.type", "BLOCK");
+    sparkConf.setIfMissing("spark.driver.allowMultipleContexts", "true");
 
     additionalConfigs.forEach(sparkConf::set);
     return sparkConf;
@@ -329,15 +341,15 @@ public class UtilHelpers {
 
   private static SparkConf buildSparkConf(String appName, Map<String, String> additionalConfigs) {
     final SparkConf sparkConf = new SparkConf().setAppName(appName);
-    sparkConf.set("spark.ui.port", "8090");
+    sparkConf.setIfMissing("spark.ui.port", "8090");
     sparkConf.setIfMissing("spark.driver.maxResultSize", "2g");
-    sparkConf.set("spark.serializer", "org.apache.spark.serializer.KryoSerializer");
-    sparkConf.set("spark.kryo.registrator", "org.apache.spark.HoodieSparkKryoRegistrar");
-    sparkConf.set("spark.sql.extensions", "org.apache.spark.sql.hudi.HoodieSparkSessionExtension");
-    sparkConf.set("spark.hadoop.mapred.output.compress", "true");
-    sparkConf.set("spark.hadoop.mapred.output.compression.codec", "true");
-    sparkConf.set("spark.hadoop.mapred.output.compression.codec", "org.apache.hadoop.io.compress.GzipCodec");
-    sparkConf.set("spark.hadoop.mapred.output.compression.type", "BLOCK");
+    sparkConf.setIfMissing("spark.serializer", "org.apache.spark.serializer.KryoSerializer");
+    sparkConf.setIfMissing("spark.kryo.registrator", "org.apache.spark.HoodieSparkKryoRegistrar");
+    sparkConf.setIfMissing("spark.sql.extensions", "org.apache.spark.sql.hudi.HoodieSparkSessionExtension");
+    sparkConf.setIfMissing("spark.hadoop.mapred.output.compress", "true");
+    sparkConf.setIfMissing("spark.hadoop.mapred.output.compression.codec", "true");
+    sparkConf.setIfMissing("spark.hadoop.mapred.output.compression.codec", "org.apache.hadoop.io.compress.GzipCodec");
+    sparkConf.setIfMissing("spark.hadoop.mapred.output.compression.type", "BLOCK");
 
     additionalConfigs.forEach(sparkConf::set);
     return sparkConf;
@@ -378,9 +390,10 @@ public class UtilHelpers {
    */
   public static SparkRDDWriteClient<HoodieRecordPayload> createHoodieClient(JavaSparkContext jsc, String basePath, String schemaStr,
       int parallelism, Option<String> compactionStrategyClass, TypedProperties properties) {
-    HoodieCompactionConfig compactionConfig = compactionStrategyClass
+    Option<CompactionStrategy> strategyOpt = compactionStrategyClass.map(ReflectionUtils::loadClass);
+    HoodieCompactionConfig compactionConfig = strategyOpt
         .map(strategy -> HoodieCompactionConfig.newBuilder().withInlineCompaction(false)
-            .withCompactionStrategy(ReflectionUtils.loadClass(strategy)).build())
+            .withCompactionStrategy(strategy).build())
         .orElse(HoodieCompactionConfig.newBuilder().withInlineCompaction(false).build());
     HoodieWriteConfig config =
         HoodieWriteConfig.newBuilder().withPath(basePath)
@@ -539,12 +552,6 @@ public class UtilHelpers {
 
     String schemaPostProcessorClass = getStringWithAltKeys(
         cfg, SchemaProviderPostProcessorConfig.SCHEMA_POST_PROCESSOR, true);
-    boolean enableSparkAvroPostProcessor =
-        getBooleanWithAltKeys(cfg, HoodieSchemaProviderConfig.SPARK_AVRO_POST_PROCESSOR_ENABLE);
-    if (transformerClassNames != null && !transformerClassNames.isEmpty()
-        && enableSparkAvroPostProcessor && StringUtils.isNullOrEmpty(schemaPostProcessorClass)) {
-      schemaPostProcessorClass = SparkAvroPostProcessor.class.getName();
-    }
 
     if (schemaPostProcessorClass == null || schemaPostProcessorClass.isEmpty()) {
       return provider;
@@ -556,19 +563,25 @@ public class UtilHelpers {
 
   public static SchemaProvider getSchemaProviderForKafkaSource(SchemaProvider provider, TypedProperties cfg, JavaSparkContext jssc) {
     if (KafkaOffsetPostProcessor.Config.shouldAddOffsets(cfg)) {
-      return new SchemaProviderWithPostProcessor(provider, Option.ofNullable(new KafkaOffsetPostProcessor(cfg, jssc)));
+      return new SchemaProviderWithPostProcessor(provider,
+          Option.ofNullable(new KafkaOffsetPostProcessor(cfg, jssc)));
     }
     return provider;
   }
 
-  public static SchemaProvider createRowBasedSchemaProvider(StructType structType, TypedProperties cfg, JavaSparkContext jssc) {
+  public static SchemaProvider createRowBasedSchemaProvider(StructType structType,
+                                                            TypedProperties cfg,
+                                                            JavaSparkContext jssc) {
     SchemaProvider rowSchemaProvider = new RowBasedSchemaProvider(structType);
     return wrapSchemaProviderWithPostProcessor(rowSchemaProvider, cfg, jssc, null);
   }
 
-  public static Option<Schema> getLatestTableSchema(JavaSparkContext jssc, FileSystem fs, String basePath, HoodieTableMetaClient tableMetaClient) {
+  public static Option<Schema> getLatestTableSchema(JavaSparkContext jssc,
+                                                    HoodieStorage storage,
+                                                    String basePath,
+                                                    HoodieTableMetaClient tableMetaClient) {
     try {
-      if (FSUtils.isTableExists(basePath, fs)) {
+      if (FSUtils.isTableExists(basePath, storage)) {
         TableSchemaResolver tableSchemaResolver = new TableSchemaResolver(tableMetaClient);
 
         return tableSchemaResolver.getTableAvroSchemaFromLatestCommit(false);
@@ -583,15 +596,18 @@ public class UtilHelpers {
   public static HoodieTableMetaClient createMetaClient(
       JavaSparkContext jsc, String basePath, boolean shouldLoadActiveTimelineOnLoad) {
     return HoodieTableMetaClient.builder()
-        .setConf(jsc.hadoopConfiguration())
+        .setConf(HadoopFSUtils.getStorageConfWithCopy(jsc.hadoopConfiguration()))
         .setBasePath(basePath)
         .setLoadActiveTimelineOnLoad(shouldLoadActiveTimelineOnLoad)
         .build();
   }
 
-  public static void addLockOptions(String basePath, TypedProperties props) {
+  public static void addLockOptions(String basePath, String schema, TypedProperties props) {
     if (!props.containsKey(HoodieLockConfig.LOCK_PROVIDER_CLASS_NAME.key())) {
-      props.putAll(FileSystemBasedLockProvider.getLockConfig(basePath));
+      List<String> customSupportedFSs = props.getStringList(HoodieCommonConfig.HOODIE_FS_ATOMIC_CREATION_SUPPORT.key(), ",", new ArrayList<>());
+      if (schema == null || customSupportedFSs.contains(schema) || StorageSchemes.isAtomicCreationSupported(schema)) {
+        props.putAll(FileSystemBasedLockProvider.getLockConfig(basePath));
+      }
     }
   }
 
@@ -608,6 +624,7 @@ public class UtilHelpers {
       } while (ret != 0 && maxRetryCount-- > 0);
     } catch (Throwable t) {
       LOG.error(errorMessage, t);
+      throw new RuntimeException("Failed in retry", t);
     }
     return ret;
   }

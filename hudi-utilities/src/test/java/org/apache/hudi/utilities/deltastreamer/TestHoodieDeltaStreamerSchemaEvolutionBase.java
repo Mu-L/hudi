@@ -25,7 +25,7 @@ import org.apache.hudi.HoodieSparkUtils;
 import org.apache.hudi.TestHoodieSparkUtils;
 import org.apache.hudi.avro.HoodieAvroUtils;
 import org.apache.hudi.client.common.HoodieSparkEngineContext;
-import org.apache.hudi.common.config.HoodieReaderConfig;
+import org.apache.hudi.common.config.HoodieStorageConfig;
 import org.apache.hudi.common.config.TypedProperties;
 import org.apache.hudi.common.model.HoodieAvroRecord;
 import org.apache.hudi.common.model.WriteOperationType;
@@ -33,6 +33,7 @@ import org.apache.hudi.common.util.Option;
 import org.apache.hudi.config.HoodieClusteringConfig;
 import org.apache.hudi.config.HoodieCompactionConfig;
 import org.apache.hudi.config.HoodieErrorTableConfig;
+import org.apache.hudi.utilities.ingestion.HoodieIngestionMetrics;
 import org.apache.hudi.utilities.schema.FilebasedSchemaProvider;
 import org.apache.hudi.utilities.schema.SchemaProvider;
 import org.apache.hudi.utilities.sources.AvroKafkaSource;
@@ -96,6 +97,7 @@ public class TestHoodieDeltaStreamerSchemaEvolutionBase extends HoodieDeltaStrea
   protected Boolean multiLogFiles;
   protected Boolean useSchemaProvider;
   protected Boolean hasTransformer;
+  protected Boolean useParquetLogBlock;
   protected String sourceSchemaFile;
   protected String targetSchemaFile;
   protected boolean useKafkaSource;
@@ -103,17 +105,12 @@ public class TestHoodieDeltaStreamerSchemaEvolutionBase extends HoodieDeltaStrea
   protected boolean useTransformer;
   protected boolean userProvidedSchema;
 
-  protected Map<String, String> readOpts = new HashMap<String, String>() {
-    {
-      put(HoodieReaderConfig.FILE_GROUP_READER_ENABLED.key(), "false");
-    }
-  };
-
   @BeforeAll
   public static void initKafka() {
     defaultSchemaProviderClassName = TestSchemaProvider.class.getName();
   }
 
+  @Override
   @BeforeEach
   public void setupTest() {
     super.setupTest();
@@ -122,9 +119,11 @@ public class TestHoodieDeltaStreamerSchemaEvolutionBase extends HoodieDeltaStrea
     useSchemaProvider = false;
     hasTransformer = false;
     withErrorTable = false;
+    useParquetLogBlock = false;
     sourceSchemaFile = "";
     targetSchemaFile = "";
     topicName = "topic" + testNum;
+    sparkSession.conf().set("spark.sql.parquet.enableNestedColumnVectorizedReader", "false");
   }
 
   @AfterEach
@@ -156,10 +155,11 @@ public class TestHoodieDeltaStreamerSchemaEvolutionBase extends HoodieDeltaStrea
 
   protected HoodieDeltaStreamer.Config getDeltaStreamerConfig(String[] transformerClasses, boolean nullForDeletedCols,
                                                               TypedProperties extraProps) throws IOException {
-    extraProps.setProperty(HoodieReaderConfig.FILE_GROUP_READER_ENABLED.key(), "false");
+
     extraProps.setProperty("hoodie.datasource.write.table.type", tableType);
     extraProps.setProperty("hoodie.datasource.write.row.writer.enable", rowWriterEnable.toString());
     extraProps.setProperty(DataSourceWriteOptions.SET_NULL_FOR_MISSING_COLUMNS().key(), Boolean.toString(nullForDeletedCols));
+    extraProps.setProperty(HoodieStorageConfig.LOGFILE_DATA_BLOCK_FORMAT.key(), useParquetLogBlock ? "parquet" : "avro");
 
     //we set to 0 so that we create new base files on insert instead of adding inserts to existing filegroups via small file handling
     extraProps.setProperty("hoodie.parquet.small.file.limit", "0");
@@ -206,7 +206,7 @@ public class TestHoodieDeltaStreamerSchemaEvolutionBase extends HoodieDeltaStrea
           transformerClassNames, PROPS_FILENAME_TEST_AVRO_KAFKA, false,  useSchemaProvider, 100000, false, null, tableType, "timestamp", null);
     } else {
       prepareParquetDFSSource(false, hasTransformer, sourceSchemaFile, targetSchemaFile, PROPS_FILENAME_TEST_PARQUET,
-          PARQUET_SOURCE_ROOT, false, "partition_path", "", extraProps);
+          PARQUET_SOURCE_ROOT, false, "partition_path", "", extraProps, false);
       cfg = TestHoodieDeltaStreamer.TestHelpers.makeConfig(tableBasePath, WriteOperationType.UPSERT, ParquetDFSSource.class.getName(),
           transformerClassNames, PROPS_FILENAME_TEST_PARQUET, false,
           useSchemaProvider, 100000, false, null, tableType, "timestamp", null);
@@ -329,13 +329,25 @@ public class TestHoodieDeltaStreamerSchemaEvolutionBase extends HoodieDeltaStrea
     }
   }
 
+  public static class TestErrorTableV1 extends TestErrorTable {
+    public TestErrorTableV1(HoodieStreamer.Config cfg,
+                            SparkSession sparkSession,
+                            TypedProperties props,
+                            HoodieSparkEngineContext hoodieSparkContext,
+                            FileSystem fs,
+                            Option<HoodieIngestionMetrics> metrics) {
+      super(cfg, sparkSession, props, hoodieSparkContext, fs);
+    }
+  }
+
   public static class TestErrorTable extends BaseErrorTableWriter {
 
     public static List<JavaRDD> errorEvents = new ArrayList<>();
     public static Map<String,Option<JavaRDD>> commited = new HashMap<>();
+
     public TestErrorTable(HoodieStreamer.Config cfg, SparkSession sparkSession, TypedProperties props, HoodieSparkEngineContext hoodieSparkContext,
-                          FileSystem fs) {
-      super(cfg, sparkSession, props, hoodieSparkContext, fs);
+                          FileSystem fileSystem) {
+      super(cfg, sparkSession, props, hoodieSparkContext, fileSystem);
     }
 
     @Override

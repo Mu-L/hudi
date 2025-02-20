@@ -18,6 +18,7 @@
 
 package org.apache.hudi.utilities;
 
+import org.apache.hudi.SparkAdapterSupport$;
 import org.apache.hudi.client.SparkRDDWriteClient;
 import org.apache.hudi.client.WriteStatus;
 import org.apache.hudi.client.common.HoodieSparkEngineContext;
@@ -29,7 +30,9 @@ import org.apache.hudi.common.model.HoodieKey;
 import org.apache.hudi.common.model.HoodieRecord;
 import org.apache.hudi.common.model.HoodieRecordPayload;
 import org.apache.hudi.common.table.HoodieTableMetaClient;
+import org.apache.hudi.common.table.HoodieTableVersion;
 import org.apache.hudi.common.util.Option;
+import org.apache.hudi.exception.HoodieException;
 import org.apache.hudi.exception.HoodieIOException;
 import org.apache.hudi.hadoop.fs.HadoopFSUtils;
 import org.apache.hudi.utilities.streamer.HoodieStreamer;
@@ -60,7 +63,6 @@ import java.util.ArrayList;
 import java.util.Arrays;
 import java.util.Collections;
 import java.util.List;
-import java.util.Properties;
 
 import scala.Tuple2;
 
@@ -98,10 +100,14 @@ public class HDFSParquetImporter implements Serializable {
     HDFSParquetImporter dataImporter = new HDFSParquetImporter(cfg);
     JavaSparkContext jssc =
         UtilHelpers.buildSparkContext("data-importer-" + cfg.tableName, cfg.sparkMaster, cfg.sparkMemory);
+    int exitCode = 0;
     try {
       dataImporter.dataImport(jssc, cfg.retry);
+    } catch (Throwable throwable) {
+      exitCode = 1;
+      throw new HoodieException("Failed to run HoodieStreamer ", throwable);
     } finally {
-      jssc.stop();
+      SparkAdapterSupport$.MODULE$.sparkAdapter().stopSparkContext(jssc, exitCode);
     }
 
   }
@@ -139,11 +145,11 @@ public class HDFSParquetImporter implements Serializable {
 
       if (!fs.exists(new Path(cfg.targetPath))) {
         // Initialize target hoodie table.
-        Properties properties = HoodieTableMetaClient.withPropertyBuilder()
+        HoodieTableMetaClient.newTableBuilder()
             .setTableName(cfg.tableName)
             .setTableType(cfg.tableType)
-            .build();
-        HoodieTableMetaClient.initTableAndGetMetaClient(jsc.hadoopConfiguration(), cfg.targetPath, properties);
+            .setTableVersion(cfg.tableVersion)
+            .initTable(HadoopFSUtils.getStorageConfWithCopy(jsc.hadoopConfiguration()), cfg.targetPath);
       }
 
       // Get schema.
@@ -266,6 +272,8 @@ public class HDFSParquetImporter implements Serializable {
     public String tableName = null;
     @Parameter(names = {"--table-type", "-tt"}, description = "Table type", required = true)
     public String tableType = null;
+    @Parameter(names = {"--table-version", "-tv"}, description = "Table version")
+    public int tableVersion = HoodieTableVersion.current().versionCode();
     @Parameter(names = {"--row-key-field", "-rk"}, description = "Row key field name", required = true)
     public String rowKey = null;
     @Parameter(names = {"--partition-key-field", "-pk"}, description = "Partition key field name", required = true)

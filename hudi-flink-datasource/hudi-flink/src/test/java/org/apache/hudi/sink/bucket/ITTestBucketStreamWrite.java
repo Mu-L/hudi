@@ -23,12 +23,12 @@ import org.apache.hudi.common.model.IOType;
 import org.apache.hudi.common.table.HoodieTableMetaClient;
 import org.apache.hudi.common.table.timeline.HoodieInstant;
 import org.apache.hudi.common.table.timeline.HoodieTimeline;
-import org.apache.hudi.common.testutils.FileCreateUtils;
+import org.apache.hudi.common.testutils.FileCreateUtilsLegacy;
+import org.apache.hudi.common.testutils.HoodieTestUtils;
 import org.apache.hudi.configuration.FlinkOptions;
-import org.apache.hudi.hadoop.fs.HadoopFSUtils;
 import org.apache.hudi.index.HoodieIndex.IndexType;
+import org.apache.hudi.storage.HoodieStorage;
 import org.apache.hudi.storage.StoragePath;
-import org.apache.hudi.util.StreamerUtil;
 import org.apache.hudi.utils.FlinkMiniCluster;
 import org.apache.hudi.utils.TestConfigurations;
 import org.apache.hudi.utils.TestData;
@@ -37,8 +37,6 @@ import org.apache.hudi.utils.TestSQL;
 import org.apache.flink.table.api.EnvironmentSettings;
 import org.apache.flink.table.api.TableEnvironment;
 import org.apache.flink.table.api.internal.TableEnvironmentImpl;
-import org.apache.hadoop.fs.FileSystem;
-import org.apache.hadoop.fs.Path;
 import org.junit.jupiter.api.extension.ExtendWith;
 import org.junit.jupiter.api.io.TempDir;
 import org.junit.jupiter.params.ParameterizedTest;
@@ -53,6 +51,7 @@ import java.util.concurrent.TimeUnit;
 import java.util.regex.Matcher;
 import java.util.regex.Pattern;
 
+import static org.apache.hudi.common.testutils.HoodieTestUtils.INSTANT_FILE_NAME_GENERATOR;
 import static org.junit.jupiter.api.Assertions.assertEquals;
 
 /**
@@ -86,15 +85,15 @@ public class ITTestBucketStreamWrite {
 
     if (isCow) {
       TestData.checkWrittenData(tempFile, EXPECTED, 4);
-    } else  {
-      FileSystem fs = HadoopFSUtils.getFs(tempFile.getAbsolutePath(), new org.apache.hadoop.conf.Configuration());
-      TestData.checkWrittenDataMOR(fs, tempFile, EXPECTED, 4);
+    } else {
+      HoodieStorage storage = HoodieTestUtils.getStorage(tempFile.getAbsolutePath());
+      TestData.checkWrittenDataMOR(storage, tempFile, EXPECTED, 4);
     }
   }
 
   private static void doDeleteCommit(String tablePath, boolean isCow) throws Exception {
     // create metaClient
-    HoodieTableMetaClient metaClient = StreamerUtil.createMetaClient(tablePath, new org.apache.hadoop.conf.Configuration());
+    HoodieTableMetaClient metaClient = HoodieTestUtils.createMetaClient(tablePath);
 
     // should only contain one instant
     HoodieTimeline activeCompletedTimeline = metaClient.getActiveTimeline().filterCompletedInstants();
@@ -102,16 +101,17 @@ public class ITTestBucketStreamWrite {
 
     // rollback path structure: tablePath/.hoodie/.temp/${commitInstant}/${partition}/${fileGroup}_${fileInstant}.parquet.marker.APPEND
     HoodieInstant instant = activeCompletedTimeline.getInstants().get(0);
-    String commitInstant = instant.getTimestamp();
-    String filename = activeCompletedTimeline.getInstants().get(0).getFileName();
+    String commitInstant = instant.requestedTime();
+    String filename = INSTANT_FILE_NAME_GENERATOR.getFileName(activeCompletedTimeline.getInstants().get(0));
 
-    HoodieCommitMetadata commitMetadata = HoodieCommitMetadata
-        .fromBytes(metaClient.getActiveTimeline().getInstantDetails(instant).get(), HoodieCommitMetadata.class);
+    HoodieCommitMetadata commitMetadata = metaClient.getCommitMetadataSerDe()
+        .deserialize(instant, metaClient.getActiveTimeline().getInstantDetails(instant).get(),
+            HoodieCommitMetadata.class);
 
     // delete successful commit to simulate an unsuccessful write
-    FileSystem fs = metaClient.getFs();
-    Path path = new Path(metaClient.getMetaPath() + StoragePath.SEPARATOR + filename);
-    fs.delete(path);
+    HoodieStorage storage = metaClient.getStorage();
+    StoragePath path = new StoragePath(metaClient.getTimelinePath(), filename);
+    storage.deleteDirectory(path);
 
     commitMetadata.getFileIdAndRelativePaths().forEach((fileId, relativePath) -> {
       // hacky way to reconstruct markers ¯\_(ツ)_/¯
@@ -119,8 +119,8 @@ public class ITTestBucketStreamWrite {
       String partition = partitionFileNameSplit[0];
       String fileName = partitionFileNameSplit[1];
       try {
-        String markerFileName = FileCreateUtils.markerFileName(fileName, IOType.CREATE);
-        FileCreateUtils.createMarkerFile(tablePath, partition, commitInstant, markerFileName);
+        String markerFileName = FileCreateUtilsLegacy.markerFileName(fileName, IOType.CREATE);
+        FileCreateUtilsLegacy.createMarkerFile(tablePath, partition, commitInstant, markerFileName);
       } catch (IOException e) {
         throw new RuntimeException(e);
       }

@@ -21,6 +21,7 @@ package org.apache.hudi.spark3.internal;
 import org.apache.hudi.DataSourceWriteOptions;
 import org.apache.hudi.common.model.HoodieCommitMetadata;
 import org.apache.hudi.common.testutils.HoodieTestDataGenerator;
+import org.apache.hudi.common.testutils.HoodieTestUtils;
 import org.apache.hudi.common.util.Option;
 import org.apache.hudi.config.HoodieWriteConfig;
 import org.apache.hudi.internal.HoodieBulkInsertInternalWriterTestBase;
@@ -56,7 +57,7 @@ import static org.junit.jupiter.api.Assertions.assertTrue;
 /**
  * Unit tests {@link HoodieDataSourceInternalBatchWrite}.
  */
-public class TestHoodieDataSourceInternalBatchWrite extends
+class TestHoodieDataSourceInternalBatchWrite extends
     HoodieBulkInsertInternalWriterTestBase {
 
   private static Stream<Arguments> bulkInsertTypeParams() {
@@ -80,7 +81,7 @@ public class TestHoodieDataSourceInternalBatchWrite extends
     String instantTime = "001";
     // init writer
     HoodieDataSourceInternalBatchWrite dataSourceInternalBatchWrite =
-        new HoodieDataSourceInternalBatchWrite(instantTime, cfg, STRUCT_TYPE, sqlContext.sparkSession(), hadoopConf, extraMetadata, populateMetaFields, false);
+        new HoodieDataSourceInternalBatchWrite(instantTime, cfg, STRUCT_TYPE, sqlContext.sparkSession(), storageConf, extraMetadata, populateMetaFields, false);
     DataWriter<InternalRow> writer = dataSourceInternalBatchWrite.createBatchWriterFactory(null).createWriter(0, RANDOM.nextLong());
 
     String[] partitionPaths = HoodieTestDataGenerator.DEFAULT_PARTITION_PATHS;
@@ -110,22 +111,25 @@ public class TestHoodieDataSourceInternalBatchWrite extends
     dataSourceInternalBatchWrite.commit(commitMessages.toArray(new HoodieWriterCommitMessage[0]));
 
     metaClient.reloadActiveTimeline();
-    Dataset<Row> result = HoodieClientTestUtils.read(jsc, basePath, sqlContext, metaClient.getFs(), partitionPathsAbs.toArray(new String[0]));
+    Dataset<Row> result = HoodieClientTestUtils.read(
+        jsc, basePath, sqlContext, metaClient.getStorage(), partitionPathsAbs.toArray(new String[0]));
     // verify output
     assertOutput(totalInputRows, result, instantTime, Option.empty(), populateMetaFields);
     assertWriteStatuses(commitMessages.get(0).getWriteStatuses(), batches, size, Option.empty(), Option.empty());
 
     // verify extra metadata
-    Option<HoodieCommitMetadata> commitMetadataOption = HoodieClientTestUtils.getCommitMetadataForLatestInstant(metaClient);
+    Option<HoodieCommitMetadata> commitMetadataOption =
+        HoodieClientTestUtils.getCommitMetadataForLatestInstant(metaClient);
     assertTrue(commitMetadataOption.isPresent());
     Map<String, String> actualExtraMetadata = new HashMap<>();
     commitMetadataOption.get().getExtraMetadata().entrySet().stream().filter(entry ->
-        !entry.getKey().equals(HoodieCommitMetadata.SCHEMA_KEY)).forEach(entry -> actualExtraMetadata.put(entry.getKey(), entry.getValue()));
+            !entry.getKey().equals(HoodieCommitMetadata.SCHEMA_KEY))
+        .forEach(entry -> actualExtraMetadata.put(entry.getKey(), entry.getValue()));
     assertEquals(actualExtraMetadata, expectedExtraMetadata);
   }
 
   @Test
-  public void testDataSourceWriterExtraCommitMetadata() throws Exception {
+  void testDataSourceWriterExtraCommitMetadata() throws Exception {
     String commitExtraMetaPrefix = "commit_extra_meta_";
     Map<String, String> extraMeta = new HashMap<>();
     extraMeta.put(DataSourceWriteOptions.COMMIT_METADATA_KEYPREFIX().key(), commitExtraMetaPrefix);
@@ -142,7 +146,7 @@ public class TestHoodieDataSourceInternalBatchWrite extends
   }
 
   @Test
-  public void testDataSourceWriterEmptyExtraCommitMetadata() throws Exception {
+  void testDataSourceWriterEmptyExtraCommitMetadata() throws Exception {
     String commitExtraMetaPrefix = "commit_extra_meta_";
     Map<String, String> extraMeta = new HashMap<>();
     extraMeta.put(DataSourceWriteOptions.COMMIT_METADATA_KEYPREFIX().key(), commitExtraMetaPrefix);
@@ -166,7 +170,7 @@ public class TestHoodieDataSourceInternalBatchWrite extends
       String instantTime = "00" + i;
       // init writer
       HoodieDataSourceInternalBatchWrite dataSourceInternalBatchWrite =
-          new HoodieDataSourceInternalBatchWrite(instantTime, cfg, STRUCT_TYPE, sqlContext.sparkSession(), hadoopConf, Collections.EMPTY_MAP, populateMetaFields, false);
+          new HoodieDataSourceInternalBatchWrite(instantTime, cfg, STRUCT_TYPE, sqlContext.sparkSession(), storageConf, Collections.EMPTY_MAP, populateMetaFields, false);
       List<HoodieWriterCommitMessage> commitMessages = new ArrayList<>();
       Dataset<Row> totalInputRows = null;
       DataWriter<InternalRow> writer = dataSourceInternalBatchWrite.createBatchWriterFactory(null).createWriter(partitionCounter++, RANDOM.nextLong());
@@ -190,7 +194,7 @@ public class TestHoodieDataSourceInternalBatchWrite extends
       dataSourceInternalBatchWrite.commit(commitMessages.toArray(new HoodieWriterCommitMessage[0]));
       metaClient.reloadActiveTimeline();
 
-      Dataset<Row> result = HoodieClientTestUtils.readCommit(basePath, sqlContext, metaClient.getCommitTimeline(), instantTime, populateMetaFields);
+      Dataset<Row> result = HoodieClientTestUtils.readCommit(basePath, sqlContext, metaClient.getCommitTimeline(), instantTime, populateMetaFields, HoodieTestUtils.INSTANT_GENERATOR);
 
       // verify output
       assertOutput(totalInputRows, result, instantTime, Option.empty(), populateMetaFields);
@@ -213,7 +217,7 @@ public class TestHoodieDataSourceInternalBatchWrite extends
       String instantTime = "00" + i;
       // init writer
       HoodieDataSourceInternalBatchWrite dataSourceInternalBatchWrite =
-          new HoodieDataSourceInternalBatchWrite(instantTime, cfg, STRUCT_TYPE, sqlContext.sparkSession(), hadoopConf, Collections.EMPTY_MAP, populateMetaFields, false);
+          new HoodieDataSourceInternalBatchWrite(instantTime, cfg, STRUCT_TYPE, sqlContext.sparkSession(), storageConf, Collections.EMPTY_MAP, populateMetaFields, false);
       List<HoodieWriterCommitMessage> commitMessages = new ArrayList<>();
       Dataset<Row> totalInputRows = null;
       DataWriter<InternalRow> writer = dataSourceInternalBatchWrite.createBatchWriterFactory(null).createWriter(partitionCounter++, RANDOM.nextLong());
@@ -238,7 +242,7 @@ public class TestHoodieDataSourceInternalBatchWrite extends
       metaClient.reloadActiveTimeline();
 
       Dataset<Row> result = HoodieClientTestUtils.readCommit(basePath, sqlContext, metaClient.getCommitTimeline(), instantTime,
-          populateMetaFields);
+          populateMetaFields, HoodieTestUtils.INSTANT_GENERATOR);
 
       // verify output
       assertOutput(totalInputRows, result, instantTime, Option.empty(), populateMetaFields);
@@ -261,7 +265,7 @@ public class TestHoodieDataSourceInternalBatchWrite extends
     String instantTime0 = "00" + 0;
     // init writer
     HoodieDataSourceInternalBatchWrite dataSourceInternalBatchWrite =
-        new HoodieDataSourceInternalBatchWrite(instantTime0, cfg, STRUCT_TYPE, sqlContext.sparkSession(), hadoopConf, Collections.EMPTY_MAP, populateMetaFields, false);
+        new HoodieDataSourceInternalBatchWrite(instantTime0, cfg, STRUCT_TYPE, sqlContext.sparkSession(), storageConf, Collections.EMPTY_MAP, populateMetaFields, false);
     DataWriter<InternalRow> writer = dataSourceInternalBatchWrite.createBatchWriterFactory(null).createWriter(0, RANDOM.nextLong());
 
     List<String> partitionPaths = Arrays.asList(HoodieTestDataGenerator.DEFAULT_PARTITION_PATHS);
@@ -291,7 +295,8 @@ public class TestHoodieDataSourceInternalBatchWrite extends
     // commit 1st batch
     dataSourceInternalBatchWrite.commit(commitMessages.toArray(new HoodieWriterCommitMessage[0]));
     metaClient.reloadActiveTimeline();
-    Dataset<Row> result = HoodieClientTestUtils.read(jsc, basePath, sqlContext, metaClient.getFs(), partitionPathsAbs.toArray(new String[0]));
+    Dataset<Row> result = HoodieClientTestUtils.read(
+        jsc, basePath, sqlContext, metaClient.getStorage(), partitionPathsAbs.toArray(new String[0]));
     // verify rows
     assertOutput(totalInputRows, result, instantTime0, Option.empty(), populateMetaFields);
     assertWriteStatuses(commitMessages.get(0).getWriteStatuses(), batches, size, Option.empty(), Option.empty());
@@ -299,7 +304,8 @@ public class TestHoodieDataSourceInternalBatchWrite extends
     // 2nd batch. abort in the end
     String instantTime1 = "00" + 1;
     dataSourceInternalBatchWrite =
-        new HoodieDataSourceInternalBatchWrite(instantTime1, cfg, STRUCT_TYPE, sqlContext.sparkSession(), hadoopConf, Collections.EMPTY_MAP, populateMetaFields, false);
+        new HoodieDataSourceInternalBatchWrite(instantTime1, cfg, STRUCT_TYPE, sqlContext.sparkSession(), storageConf,
+            Collections.EMPTY_MAP, populateMetaFields, false);
     writer = dataSourceInternalBatchWrite.createBatchWriterFactory(null).createWriter(1, RANDOM.nextLong());
 
     for (int j = 0; j < batches; j++) {
@@ -314,7 +320,8 @@ public class TestHoodieDataSourceInternalBatchWrite extends
     // commit 1st batch
     dataSourceInternalBatchWrite.abort(commitMessages.toArray(new HoodieWriterCommitMessage[0]));
     metaClient.reloadActiveTimeline();
-    result = HoodieClientTestUtils.read(jsc, basePath, sqlContext, metaClient.getFs(), partitionPathsAbs.toArray(new String[0]));
+    result = HoodieClientTestUtils.read(
+        jsc, basePath, sqlContext, metaClient.getStorage(), partitionPathsAbs.toArray(new String[0]));
     // verify rows
     // only rows from first batch should be present
     assertOutput(totalInputRows, result, instantTime0, Option.empty(), populateMetaFields);

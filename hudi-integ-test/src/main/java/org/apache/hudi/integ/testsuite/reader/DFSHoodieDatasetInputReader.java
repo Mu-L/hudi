@@ -41,13 +41,13 @@ import org.apache.hudi.common.util.Option;
 import org.apache.hudi.common.util.TypeUtils;
 import org.apache.hudi.common.util.ValidationUtils;
 import org.apache.hudi.common.util.collection.CloseableMappingIterator;
+import org.apache.hudi.hadoop.fs.HadoopFSUtils;
 import org.apache.hudi.io.storage.HoodieAvroFileReader;
-import org.apache.hudi.io.storage.HoodieFileReaderFactory;
+import org.apache.hudi.io.storage.HoodieIOFactory;
 
 import org.apache.avro.Schema;
 import org.apache.avro.generic.GenericRecord;
 import org.apache.avro.generic.IndexedRecord;
-import org.apache.hadoop.fs.Path;
 import org.apache.spark.api.java.JavaPairRDD;
 import org.apache.spark.api.java.JavaRDD;
 import org.apache.spark.api.java.JavaSparkContext;
@@ -88,14 +88,16 @@ public class DFSHoodieDatasetInputReader extends DFSDeltaInputReader {
   public DFSHoodieDatasetInputReader(JavaSparkContext jsc, String basePath, String schemaStr) {
     this.jsc = jsc;
     this.schemaStr = schemaStr;
-    this.metaClient = HoodieTableMetaClient.builder().setConf(jsc.hadoopConfiguration()).setBasePath(basePath).build();
+    this.metaClient = HoodieTableMetaClient.builder()
+        .setConf(HadoopFSUtils.getStorageConfWithCopy(jsc.hadoopConfiguration()))
+        .setBasePath(basePath).build();
   }
 
   protected List<String> getPartitions(Option<Integer> partitionsLimit) throws IOException {
     // Using FSUtils.getFS here instead of metaClient.getFS() since we don't want to count these listStatus
     // calls in metrics as they are not part of normal HUDI operation.
     HoodieSparkEngineContext engineContext = new HoodieSparkEngineContext(jsc);
-    List<String> partitionPaths = FSUtils.getAllPartitionPaths(engineContext, metaClient.getBasePath(),
+    List<String> partitionPaths = FSUtils.getAllPartitionPaths(engineContext, metaClient.getStorage(), metaClient.getBasePath(),
         HoodieMetadataConfig.DEFAULT_METADATA_ENABLE_FOR_READERS);
     // Sort partition so we can pick last N partitions by default
     Collections.sort(partitionPaths);
@@ -111,8 +113,8 @@ public class DFSHoodieDatasetInputReader extends DFSDeltaInputReader {
 
   private JavaPairRDD<String, Iterator<FileSlice>> getPartitionToFileSlice(HoodieTableMetaClient metaClient,
       List<String> partitionPaths) {
-    TableFileSystemView.SliceView fileSystemView = new HoodieTableFileSystemView(metaClient,
-        metaClient.getCommitsAndCompactionTimeline().filterCompletedInstants());
+    TableFileSystemView.SliceView fileSystemView = HoodieTableFileSystemView.fileListingBasedFileSystemView(new HoodieSparkEngineContext(jsc),
+        metaClient, metaClient.getCommitsAndCompactionTimeline().filterCompletedInstants());
     // pass num partitions to another method
     JavaPairRDD<String, Iterator<FileSlice>> partitionToFileSliceList = jsc.parallelize(partitionPaths).mapToPair(p -> {
       return new Tuple2<>(p, fileSystemView.getLatestFileSlices(p).iterator());
@@ -272,22 +274,25 @@ public class DFSHoodieDatasetInputReader extends DFSDeltaInputReader {
     if (fileSlice.getBaseFile().isPresent()) {
       // Read the base files using the latest writer schema.
       Schema schema = HoodieAvroUtils.addMetadataFields(new Schema.Parser().parse(schemaStr));
-      HoodieAvroFileReader reader = TypeUtils.unsafeCast(HoodieFileReaderFactory.getReaderFactory(HoodieRecordType.AVRO).getFileReader(
-          DEFAULT_HUDI_CONFIG_FOR_READER, metaClient.getHadoopConf(), new Path(fileSlice.getBaseFile().get().getPath())));
+      HoodieAvroFileReader reader = TypeUtils.unsafeCast(HoodieIOFactory.getIOFactory(metaClient.getStorage())
+          .getReaderFactory(HoodieRecordType.AVRO)
+          .getFileReader(
+              DEFAULT_HUDI_CONFIG_FOR_READER,
+              fileSlice.getBaseFile().get().getStoragePath()));
       return new CloseableMappingIterator<>(reader.getRecordIterator(schema), HoodieRecord::getData);
     } else {
       // If there is no data file, fall back to reading log files
       HoodieMergedLogRecordScanner scanner = HoodieMergedLogRecordScanner.newBuilder()
-          .withFileSystem(metaClient.getFs())
+          .withStorage(metaClient.getStorage())
           .withBasePath(metaClient.getBasePath())
           .withLogFilePaths(
-              fileSlice.getLogFiles().map(l -> l.getPath().getName()).collect(Collectors.toList()))
+              fileSlice.getLogFiles().map(l -> l.getPath().getName())
+                  .collect(Collectors.toList()))
           .withReaderSchema(new Schema.Parser().parse(schemaStr))
           .withLatestInstantTime(metaClient.getActiveTimeline().getCommitsTimeline()
-              .filterCompletedInstants().lastInstant().get().getTimestamp())
+              .filterCompletedInstants().lastInstant().get().requestedTime())
           .withMaxMemorySizeInBytes(
               HoodieMemoryConfig.DEFAULT_MAX_MEMORY_FOR_SPILLABLE_MAP_IN_BYTES)
-          .withReadBlocksLazily(true)
           .withReverseReader(false)
           .withBufferSize(HoodieMemoryConfig.MAX_DFS_STREAM_BUFFER_SIZE.defaultValue())
           .withSpillableMapBasePath(FileIOUtils.getDefaultSpillableMapBasePath())

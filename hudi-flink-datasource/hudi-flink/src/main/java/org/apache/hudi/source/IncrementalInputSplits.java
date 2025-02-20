@@ -31,20 +31,22 @@ import org.apache.hudi.common.table.log.InstantRange;
 import org.apache.hudi.common.table.read.IncrementalQueryAnalyzer;
 import org.apache.hudi.common.table.timeline.HoodieInstant;
 import org.apache.hudi.common.table.timeline.HoodieTimeline;
+import org.apache.hudi.common.table.timeline.InstantComparison;
 import org.apache.hudi.common.table.view.HoodieTableFileSystemView;
 import org.apache.hudi.common.util.Option;
 import org.apache.hudi.configuration.FlinkOptions;
 import org.apache.hudi.configuration.OptionsResolver;
-import org.apache.hudi.hadoop.utils.HoodieInputFormatUtils;
+import org.apache.hudi.metadata.HoodieTableMetadataUtil;
 import org.apache.hudi.sink.partitioner.profile.WriteProfiles;
 import org.apache.hudi.source.prune.PartitionPruners;
+import org.apache.hudi.storage.StoragePath;
+import org.apache.hudi.storage.StoragePathInfo;
 import org.apache.hudi.table.format.cdc.CdcInputSplit;
 import org.apache.hudi.table.format.mor.MergeOnReadInputSplit;
 
 import org.apache.flink.configuration.Configuration;
 import org.apache.flink.core.fs.Path;
 import org.apache.flink.table.types.logical.RowType;
-import org.apache.hadoop.fs.FileStatus;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
@@ -91,6 +93,8 @@ public class IncrementalInputSplits implements Serializable {
   private final boolean skipCompaction;
   // skip clustering
   private final boolean skipClustering;
+  // skip insert overwrite
+  private final boolean skipInsertOverwrite;
 
   private IncrementalInputSplits(
       Configuration conf,
@@ -99,7 +103,8 @@ public class IncrementalInputSplits implements Serializable {
       long maxCompactionMemoryInBytes,
       @Nullable PartitionPruners.PartitionPruner partitionPruner,
       boolean skipCompaction,
-      boolean skipClustering) {
+      boolean skipClustering,
+      boolean skipInsertOverwrite) {
     this.conf = conf;
     this.path = path;
     this.rowType = rowType;
@@ -107,6 +112,7 @@ public class IncrementalInputSplits implements Serializable {
     this.partitionPruner = partitionPruner;
     this.skipCompaction = skipCompaction;
     this.skipClustering = skipClustering;
+    this.skipInsertOverwrite = skipInsertOverwrite;
   }
 
   /**
@@ -130,11 +136,13 @@ public class IncrementalInputSplits implements Serializable {
 
     IncrementalQueryAnalyzer analyzer = IncrementalQueryAnalyzer.builder()
         .metaClient(metaClient)
-        .startTime(this.conf.getString(FlinkOptions.READ_START_COMMIT))
-        .endTime(this.conf.getString(FlinkOptions.READ_END_COMMIT))
+        .startCompletionTime(this.conf.getString(FlinkOptions.READ_START_COMMIT))
+        .endCompletionTime(this.conf.getString(FlinkOptions.READ_END_COMMIT))
         .rangeType(InstantRange.RangeType.CLOSED_CLOSED)
         .skipCompaction(skipCompaction)
         .skipClustering(skipClustering)
+        .skipInsertOverwrite(skipInsertOverwrite)
+        .readCdcFromChangelog(this.conf.getBoolean(FlinkOptions.READ_CDC_FROM_CHANGELOG))
         .build();
 
     IncrementalQueryAnalyzer.QueryContext analyzingResult = analyzer.analyze();
@@ -166,7 +174,7 @@ public class IncrementalInputSplits implements Serializable {
     //   3. the start commit is archived
     //   4. the end commit is archived
     Set<String> readPartitions;
-    final FileStatus[] fileStatuses;
+    final List<StoragePathInfo> fileInfoList;
     if (fullTableScan) {
       // scans the partitions and files directly.
       FileIndex fileIndex = getFileIndex();
@@ -175,7 +183,7 @@ public class IncrementalInputSplits implements Serializable {
         LOG.warn("No partitions found for reading in user provided path.");
         return Result.EMPTY;
       }
-      fileStatuses = fileIndex.getFilesInPartitions();
+      fileInfoList = fileIndex.getFilesInPartitions();
     } else {
       if (cdcEnabled) {
         // case1: cdc change log enabled
@@ -186,13 +194,16 @@ public class IncrementalInputSplits implements Serializable {
       String tableName = conf.getString(FlinkOptions.TABLE_NAME);
       List<HoodieInstant> instants = analyzingResult.getActiveInstants();
       List<HoodieCommitMetadata> metadataList = instants.stream()
-          .map(instant -> WriteProfiles.getCommitMetadata(tableName, path, instant, commitTimeline)).collect(Collectors.toList());
+          .map(instant -> WriteProfiles.getCommitMetadata(tableName, path, instant, commitTimeline))
+          .collect(Collectors.toList());
       readPartitions = getReadPartitions(metadataList);
       if (readPartitions.size() == 0) {
         LOG.warn("No partitions found for reading in user provided path.");
         return Result.EMPTY;
       }
-      FileStatus[] files = WriteProfiles.getFilesFromMetadata(path, metaClient.getHadoopConf(), metadataList, metaClient.getTableType(), false);
+      List<StoragePathInfo> files = WriteProfiles.getFilesFromMetadata(
+          path, (org.apache.hadoop.conf.Configuration) metaClient.getStorageConf().unwrap(),
+          metadataList, metaClient.getTableType(), false);
       if (files == null) {
         LOG.warn("Found deleted files in metadata, fall back to full table scan.");
         // fallback to full table scan
@@ -203,19 +214,19 @@ public class IncrementalInputSplits implements Serializable {
           LOG.warn("No partitions found for reading in user provided path.");
           return Result.EMPTY;
         }
-        fileStatuses = fileIndex.getFilesInPartitions();
+        fileInfoList = fileIndex.getFilesInPartitions();
       } else {
-        fileStatuses = files;
+        fileInfoList = files;
       }
     }
 
-    if (fileStatuses.length == 0) {
+    if (fileInfoList.size() == 0) {
       LOG.warn("No files found for reading in user provided path.");
       return Result.EMPTY;
     }
 
     List<MergeOnReadInputSplit> inputSplits = getInputSplits(metaClient, commitTimeline,
-        fileStatuses, readPartitions, endInstant, analyzingResult.getMaxCompletionTime(), instantRange, false);
+        fileInfoList, readPartitions, endInstant, analyzingResult.getMaxCompletionTime(), instantRange, false);
 
     return Result.instance(inputSplits, endInstant);
   }
@@ -236,11 +247,13 @@ public class IncrementalInputSplits implements Serializable {
     metaClient.reloadActiveTimeline();
     IncrementalQueryAnalyzer analyzer = IncrementalQueryAnalyzer.builder()
         .metaClient(metaClient)
-        .startTime(issuedOffset != null ? issuedOffset : this.conf.getString(FlinkOptions.READ_START_COMMIT))
-        .endTime(this.conf.getString(FlinkOptions.READ_END_COMMIT))
+        .startCompletionTime(issuedOffset != null ? issuedOffset : this.conf.getString(FlinkOptions.READ_START_COMMIT))
+        .endCompletionTime(this.conf.getString(FlinkOptions.READ_END_COMMIT))
         .rangeType(issuedOffset != null ? InstantRange.RangeType.OPEN_CLOSED : InstantRange.RangeType.CLOSED_CLOSED)
         .skipCompaction(skipCompaction)
         .skipClustering(skipClustering)
+        .skipInsertOverwrite(skipInsertOverwrite)
+        .readCdcFromChangelog(this.conf.getBoolean(FlinkOptions.READ_CDC_FROM_CHANGELOG))
         .limit(OptionsResolver.getReadCommitsLimit(conf))
         .build();
 
@@ -270,18 +283,20 @@ public class IncrementalInputSplits implements Serializable {
         return Result.EMPTY;
       }
 
-      FileStatus[] fileStatuses = fileIndex.getFilesInPartitions();
-      if (fileStatuses.length == 0) {
+      List<StoragePathInfo> pathInfoList = fileIndex.getFilesInPartitions();
+      if (pathInfoList.size() == 0) {
         LOG.warn("No files found for reading under path: " + path);
         return Result.EMPTY;
       }
 
       List<MergeOnReadInputSplit> inputSplits = getInputSplits(metaClient, commitTimeline,
-          fileStatuses, readPartitions, endInstant, offsetToIssue, null, false);
+          pathInfoList, readPartitions, endInstant, offsetToIssue, null, false);
 
       return Result.instance(inputSplits, endInstant, offsetToIssue);
     } else {
-      List<MergeOnReadInputSplit> inputSplits = getIncInputSplits(metaClient, metaClient.getHadoopConf(), commitTimeline, queryContext, instantRange.get(), endInstant, cdcEnabled);
+      List<MergeOnReadInputSplit> inputSplits = getIncInputSplits(
+          metaClient, (org.apache.hadoop.conf.Configuration) metaClient.getStorageConf().unwrap(),
+          commitTimeline, queryContext, instantRange.get(), endInstant, cdcEnabled);
       return Result.instance(inputSplits, endInstant, offsetToIssue);
     }
   }
@@ -323,27 +338,28 @@ public class IncrementalInputSplits implements Serializable {
       LOG.warn("No partitions found for reading under path: " + path);
       return Collections.emptyList();
     }
-    FileStatus[] fileStatuses = WriteProfiles.getFilesFromMetadata(path, hadoopConf, metadataList, metaClient.getTableType());
+    List<StoragePathInfo> pathInfoList = WriteProfiles.getFilesFromMetadata(
+        path, hadoopConf, metadataList, metaClient.getTableType());
 
-    if (fileStatuses.length == 0) {
+    if (pathInfoList.size() == 0) {
       LOG.warn("No files found for reading under path: " + path);
       return Collections.emptyList();
     }
 
     return getInputSplits(metaClient, commitTimeline,
-        fileStatuses, readPartitions, endInstant, queryContext.getMaxCompletionTime(), instantRange, skipCompaction);
+        pathInfoList, readPartitions, endInstant, queryContext.getMaxCompletionTime(), instantRange, skipCompaction);
   }
 
   private List<MergeOnReadInputSplit> getInputSplits(
       HoodieTableMetaClient metaClient,
       HoodieTimeline commitTimeline,
-      FileStatus[] fileStatuses,
+      List<StoragePathInfo> pathInfoList,
       Set<String> readPartitions,
       String endInstant,
       String maxCompletionTime,
       InstantRange instantRange,
       boolean skipBaseFiles) {
-    final HoodieTableFileSystemView fsView = new HoodieTableFileSystemView(metaClient, commitTimeline, fileStatuses);
+    final HoodieTableFileSystemView fsView = new HoodieTableFileSystemView(metaClient, commitTimeline, pathInfoList);
     final AtomicInteger cnt = new AtomicInteger(0);
     final String mergeType = this.conf.getString(FlinkOptions.MERGE_TYPE);
     return readPartitions.stream()
@@ -357,10 +373,10 @@ public class IncrementalInputSplits implements Serializable {
               String basePath = fileSlice.getBaseFile().map(BaseFile::getPath).orElse(null);
               // the latest commit is used as the limit of the log reader instant upper threshold,
               // it must be at least the latest instant time of the file slice to avoid data loss.
-              String latestCommit = HoodieTimeline.minInstant(fileSlice.getLatestInstantTime(), endInstant);
+              String latestCommit = InstantComparison.minInstant(fileSlice.getLatestInstantTime(), endInstant);
               return new MergeOnReadInputSplit(cnt.getAndAdd(1),
                   basePath, logPaths, latestCommit,
-                  metaClient.getBasePath(), maxCompactionMemoryInBytes, mergeType, instantRange, fileSlice.getFileId());
+                  metaClient.getBasePath().toString(), maxCompactionMemoryInBytes, mergeType, instantRange, fileSlice.getFileId());
             }).collect(Collectors.toList()))
         .flatMap(Collection::stream)
         .sorted(Comparator.comparing(MergeOnReadInputSplit::getLatestCommit))
@@ -370,7 +386,7 @@ public class IncrementalInputSplits implements Serializable {
   private List<MergeOnReadInputSplit> getCdcInputSplits(
       HoodieTableMetaClient metaClient,
       InstantRange instantRange) {
-    HoodieCDCExtractor extractor = new HoodieCDCExtractor(metaClient, instantRange);
+    HoodieCDCExtractor extractor = new HoodieCDCExtractor(metaClient, instantRange, OptionsResolver.readCDCFromChangelog(this.conf));
     Map<HoodieFileGroupId, List<HoodieCDCFileSplit>> fileSplits = extractor.extractCDCFileSplits();
 
     if (fileSplits.isEmpty()) {
@@ -381,7 +397,7 @@ public class IncrementalInputSplits implements Serializable {
     final AtomicInteger cnt = new AtomicInteger(0);
     return fileSplits.entrySet().stream()
         .map(splits ->
-            new CdcInputSplit(cnt.getAndAdd(1), metaClient.getBasePath(), maxCompactionMemoryInBytes,
+            new CdcInputSplit(cnt.getAndAdd(1), metaClient.getBasePath().toString(), maxCompactionMemoryInBytes,
                 splits.getKey().getFileId(), splits.getValue().stream().sorted().toArray(HoodieCDCFileSplit[]::new)))
         .collect(Collectors.toList());
   }
@@ -397,7 +413,7 @@ public class IncrementalInputSplits implements Serializable {
 
   private FileIndex getFileIndex() {
     return FileIndex.builder()
-        .path(new org.apache.hadoop.fs.Path(path.toUri()))
+        .path(new StoragePath(path.toUri()))
         .conf(conf)
         .rowType(rowType)
         .partitionPruner(partitionPruner)
@@ -412,7 +428,7 @@ public class IncrementalInputSplits implements Serializable {
    * @return the set of read partitions
    */
   private Set<String> getReadPartitions(List<HoodieCommitMetadata> metadataList) {
-    Set<String> partitions = HoodieInputFormatUtils.getWritePartitionPaths(metadataList);
+    Set<String> partitions = HoodieTableMetadataUtil.getWritePartitionPaths(metadataList);
     // apply partition push down
     if (this.partitionPruner != null) {
       Set<String> selectedPartitions = this.partitionPruner.filter(partitions);
@@ -498,6 +514,8 @@ public class IncrementalInputSplits implements Serializable {
     private boolean skipCompaction = false;
     // skip clustering
     private boolean skipClustering = false;
+    // skip insert overwrite
+    private boolean skipInsertOverwrite = false;
 
     public Builder() {
     }
@@ -537,10 +555,15 @@ public class IncrementalInputSplits implements Serializable {
       return this;
     }
 
+    public Builder skipInsertOverwrite(boolean skipInsertOverwrite) {
+      this.skipInsertOverwrite = skipInsertOverwrite;
+      return this;
+    }
+
     public IncrementalInputSplits build() {
       return new IncrementalInputSplits(
           Objects.requireNonNull(this.conf), Objects.requireNonNull(this.path), Objects.requireNonNull(this.rowType),
-          this.maxCompactionMemoryInBytes, this.partitionPruner, this.skipCompaction, this.skipClustering);
+          this.maxCompactionMemoryInBytes, this.partitionPruner, this.skipCompaction, this.skipClustering, this.skipInsertOverwrite);
     }
   }
 }

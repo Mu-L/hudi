@@ -46,9 +46,9 @@ import org.apache.hudi.common.util.collection.Pair;
 import org.apache.hudi.config.HoodieWriteConfig;
 import org.apache.hudi.exception.HoodieIOException;
 import org.apache.hudi.exception.HoodieSavepointException;
+import org.apache.hudi.storage.StoragePath;
 import org.apache.hudi.table.HoodieTable;
 
-import org.apache.hadoop.fs.Path;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
@@ -64,7 +64,10 @@ import java.util.Map;
 import java.util.stream.Collectors;
 import java.util.stream.Stream;
 
-import static org.apache.hudi.client.utils.MetadataTableUtils.shouldUseBatchLookup;
+import static org.apache.hudi.common.table.timeline.InstantComparison.GREATER_THAN;
+import static org.apache.hudi.common.table.timeline.InstantComparison.GREATER_THAN_OR_EQUALS;
+import static org.apache.hudi.common.table.timeline.InstantComparison.LESSER_THAN;
+import static org.apache.hudi.common.table.timeline.InstantComparison.compareTimestamps;
 
 /**
  * Cleaner is responsible for garbage collecting older files in a given partition path. Such that
@@ -80,22 +83,19 @@ public class CleanPlanner<T, I, K, O> implements Serializable {
   public static final Integer CLEAN_PLAN_VERSION_1 = CleanPlanV1MigrationHandler.VERSION;
   public static final Integer CLEAN_PLAN_VERSION_2 = CleanPlanV2MigrationHandler.VERSION;
   public static final Integer LATEST_CLEAN_PLAN_VERSION = CLEAN_PLAN_VERSION_2;
-  public static final String SAVEPOINTED_TIMESTAMPS = "savepointed_timestamps";
 
-  private final SyncableFileSystemView fileSystemView;
-  private final HoodieTimeline commitTimeline;
+  private transient HoodieTimeline commitTimeline;
   private final Map<HoodieFileGroupId, CompactionOperation> fgIdToPendingCompactionOperations;
   private final Map<HoodieFileGroupId, CompactionOperation> fgIdToPendingLogCompactionOperations;
   private final HoodieTable<T, I, K, O> hoodieTable;
   private final HoodieWriteConfig config;
   private transient HoodieEngineContext context;
-  private List<String> savepointedTimestamps;
+  private final List<String> savepointedTimestamps;
+  private Option<HoodieInstant> earliestCommitToRetain = Option.empty();
 
   public CleanPlanner(HoodieEngineContext context, HoodieTable<T, I, K, O> hoodieTable, HoodieWriteConfig config) {
     this.context = context;
     this.hoodieTable = hoodieTable;
-    this.fileSystemView = hoodieTable.getHoodieView();
-    this.commitTimeline = hoodieTable.getCompletedCommitsTimeline();
     this.config = config;
     SyncableFileSystemView fileSystemView = (SyncableFileSystemView) hoodieTable.getSliceView();
     this.fgIdToPendingCompactionOperations = fileSystemView
@@ -108,14 +108,16 @@ public class CleanPlanner<T, I, K, O> implements Serializable {
         .map(entry -> Pair.of(new HoodieFileGroupId(entry.getValue().getPartitionPath(), entry.getValue().getFileId()), entry.getValue()))
         .collect(Collectors.toMap(Pair::getKey, Pair::getValue));
 
-    // load all partitions in advance if necessary.
-    if (shouldUseBatchLookup(hoodieTable.getMetaClient().getTableConfig(), config)) {
-      LOG.info("Load all partitions and files into file system view in advance.");
-      fileSystemView.loadAllPartitions();
+    // collect savepointed timestamps to assist with incremental cleaning. For non-partitioned and metadata table, we may not need this.
+    this.savepointedTimestamps = hoodieTable.isMetadataTable() ? Collections.emptyList() : (hoodieTable.isPartitioned() ? new ArrayList<>(hoodieTable.getSavepointTimestamps())
+        : Collections.emptyList());
+  }
+
+  private HoodieTimeline getCommitTimeline() {
+    if (commitTimeline == null) {
+      commitTimeline = hoodieTable.getCompletedCommitsTimeline();
     }
-    // collect savepointed timestamps to be assist with incremental cleaning. For non-partitioned and metadata table, we may not need this.
-    this.savepointedTimestamps = hoodieTable.isMetadataTable() ? Collections.EMPTY_LIST : (hoodieTable.isPartitioned() ? hoodieTable.getSavepointTimestamps().stream().collect(Collectors.toList())
-        : Collections.EMPTY_LIST);
+    return commitTimeline;
   }
 
   /**
@@ -133,17 +135,12 @@ public class CleanPlanner<T, I, K, O> implements Serializable {
     return metadata.getPartitionMetadata().values().stream().flatMap(s -> s.getSavepointDataFile().stream());
   }
 
-  private Stream<String> getPartitionsFromSavepoint(String savepointTime) {
-    HoodieSavepointMetadata metadata = getSavepointMetadata(savepointTime);
-    return metadata.getPartitionMetadata().keySet().stream();
-  }
-
   private HoodieSavepointMetadata getSavepointMetadata(String savepointTimestamp) {
     if (!hoodieTable.getSavepointTimestamps().contains(savepointTimestamp)) {
       throw new HoodieSavepointException(
           "Could not get data files for savepoint " + savepointTimestamp + ". No such savepoint.");
     }
-    HoodieInstant instant = new HoodieInstant(false, HoodieTimeline.SAVEPOINT_ACTION, savepointTimestamp);
+    HoodieInstant instant = hoodieTable.getMetaClient().createNewInstant(HoodieInstant.State.COMPLETED, HoodieTimeline.SAVEPOINT_ACTION, savepointTimestamp);
     try {
       return TimelineMetadataUtils.deserializeHoodieSavepointMetadata(
           hoodieTable.getActiveTimeline().getInstantDetails(instant).get());
@@ -186,16 +183,12 @@ public class CleanPlanner<T, I, K, O> implements Serializable {
     if (config.incrementalCleanerModeEnabled()) {
       Option<HoodieInstant> lastClean = hoodieTable.getCleanTimeline().filterCompletedInstants().lastInstant();
       if (lastClean.isPresent()) {
-        if (hoodieTable.getActiveTimeline().isEmpty(lastClean.get())) {
-          hoodieTable.getActiveTimeline().deleteEmptyInstantIfExists(lastClean.get());
-        } else {
-          HoodieCleanMetadata cleanMetadata = TimelineMetadataUtils
-                  .deserializeHoodieCleanMetadata(hoodieTable.getActiveTimeline().getInstantDetails(lastClean.get()).get());
-          if ((cleanMetadata.getEarliestCommitToRetain() != null)
-                  && (cleanMetadata.getEarliestCommitToRetain().length() > 0)
-                  && !hoodieTable.getActiveTimeline().getCommitsTimeline().isBeforeTimelineStarts(cleanMetadata.getEarliestCommitToRetain())) {
-            return getPartitionPathsForIncrementalCleaning(cleanMetadata, instantToRetain);
-          }
+        HoodieCleanMetadata cleanMetadata = TimelineMetadataUtils
+                .deserializeHoodieCleanMetadata(hoodieTable.getActiveTimeline().getInstantDetails(lastClean.get()).get());
+        if ((cleanMetadata.getEarliestCommitToRetain() != null)
+                && !cleanMetadata.getEarliestCommitToRetain().trim().isEmpty()
+                && !hoodieTable.getActiveTimeline().getCommitsTimeline().isBeforeTimelineStarts(cleanMetadata.getEarliestCommitToRetain())) {
+          return getPartitionPathsForIncrementalCleaning(cleanMetadata, instantToRetain);
         }
       }
     }
@@ -210,52 +203,40 @@ public class CleanPlanner<T, I, K, O> implements Serializable {
    */
   private List<String> getPartitionPathsForIncrementalCleaning(HoodieCleanMetadata cleanMetadata,
       Option<HoodieInstant> newInstantToRetain) {
-    LOG.info("Incremental Cleaning mode is enabled. Looking up partition-paths that have since changed "
-        + "since last cleaned at " + cleanMetadata.getEarliestCommitToRetain()
-        + ". New Instant to retain : " + newInstantToRetain);
 
-    List<String> incrementalPartitions = hoodieTable.getCompletedCommitsTimeline().getInstantsAsStream().filter(
-        instant -> HoodieTimeline.compareTimestamps(instant.getTimestamp(), HoodieTimeline.GREATER_THAN_OR_EQUALS,
-            cleanMetadata.getEarliestCommitToRetain()) && HoodieTimeline.compareTimestamps(instant.getTimestamp(),
-            HoodieTimeline.LESSER_THAN, newInstantToRetain.get().getTimestamp()))
-        .flatMap(this::getPartitionsForInstants).distinct().collect(Collectors.toList());
+    boolean isAnySavepointDeleted = isAnySavepointDeleted(cleanMetadata);
+    if (isAnySavepointDeleted) {
+      LOG.info("Since savepoints have been removed compared to previous clean, triggering clean planning for all partitions");
+      return getPartitionPathsForFullCleaning();
+    } else {
+      LOG.info(
+          "Incremental Cleaning mode is enabled. Looking up partition-paths that have changed "
+              + "since last clean at {}. New Instant to retain {}.",
+          cleanMetadata.getEarliestCommitToRetain(),
+          newInstantToRetain);
 
-    // If any savepoint is removed b/w previous clean and this clean planning, lets include the partitions of interest.
-    // for metadata table and non partitioned table, we do not need this additional processing.
-    if (hoodieTable.isMetadataTable() || !hoodieTable.isPartitioned()) {
-      return incrementalPartitions;
+      return hoodieTable.getCompletedCommitsTimeline().getInstantsAsStream()
+          .filter(instant -> compareTimestamps(instant.requestedTime(), GREATER_THAN_OR_EQUALS,
+              cleanMetadata.getEarliestCommitToRetain()) && compareTimestamps(instant.requestedTime(),
+              LESSER_THAN, newInstantToRetain.get().requestedTime()))
+          .flatMap(this::getPartitionsForInstants).distinct().collect(Collectors.toList());
     }
-
-    List<String> partitionsFromDeletedSavepoints = getPartitionsFromDeletedSavepoint(cleanMetadata);
-    LOG.info("Including partitions part of savepointed commits which was removed after last known clean " + partitionsFromDeletedSavepoints.toString());
-    List<String> partitionsOfInterest = new ArrayList<>(incrementalPartitions);
-    partitionsOfInterest.addAll(partitionsFromDeletedSavepoints);
-    return partitionsOfInterest.stream().distinct().collect(Collectors.toList());
   }
 
-  private List<String> getPartitionsFromDeletedSavepoint(HoodieCleanMetadata cleanMetadata) {
-    List<String> savepointedTimestampsFromLastClean = Arrays.stream(cleanMetadata.getExtraMetadata()
-            .getOrDefault(SAVEPOINTED_TIMESTAMPS, StringUtils.EMPTY_STRING).split(","))
+  private boolean isAnySavepointDeleted(HoodieCleanMetadata cleanMetadata) {
+    List<String> savepointedTimestampsFromLastClean = cleanMetadata.getExtraMetadata() == null ? Collections.emptyList()
+        : Arrays.stream(cleanMetadata.getExtraMetadata().getOrDefault(CleanerUtils.SAVEPOINTED_TIMESTAMPS, StringUtils.EMPTY_STRING).split(","))
         .filter(partition -> !StringUtils.isNullOrEmpty(partition)).collect(Collectors.toList());
     if (savepointedTimestampsFromLastClean.isEmpty()) {
-      return Collections.emptyList();
+      return false;
     }
     // check for any savepointed removed in latest compared to previous saved list
     List<String> removedSavepointedTimestamps = new ArrayList<>(savepointedTimestampsFromLastClean);
     removedSavepointedTimestamps.removeAll(savepointedTimestamps);
     if (removedSavepointedTimestamps.isEmpty()) {
-      return Collections.emptyList();
+      return false;
     }
-
-    // fetch list of partitions from the removed savepoints and add it to return list
-    return removedSavepointedTimestamps.stream().flatMap(savepointCommit -> {
-      Option<HoodieInstant> instantOption = hoodieTable.getCompletedCommitsTimeline().filter(instant -> instant.getTimestamp().equals(savepointCommit)).firstInstant();
-      if (!instantOption.isPresent()) {
-        LOG.warn("Skipping to process a commit for which savepoint was removed as the instant moved to archived timeline already");
-      }
-      HoodieInstant instant = instantOption.get();
-      return getPartitionsForInstants(instant);
-    }).collect(Collectors.toList());
+    return true;
   }
 
   /**
@@ -270,8 +251,8 @@ public class CleanPlanner<T, I, K, O> implements Serializable {
             hoodieTable.getActiveTimeline().getInstantDetails(instant).get(), HoodieReplaceCommitMetadata.class);
         return Stream.concat(replaceCommitMetadata.getPartitionToReplaceFileIds().keySet().stream(), replaceCommitMetadata.getPartitionToWriteStats().keySet().stream());
       } else {
-        HoodieCommitMetadata commitMetadata = HoodieCommitMetadata
-            .fromBytes(hoodieTable.getActiveTimeline().getInstantDetails(instant).get(),
+        HoodieCommitMetadata commitMetadata = hoodieTable.getMetaClient()
+            .getCommitMetadataSerDe().deserialize(instant, hoodieTable.getActiveTimeline().getInstantDetails(instant).get(),
                 HoodieCommitMetadata.class);
         return commitMetadata.getPartitionToWriteStats().keySet().stream();
       }
@@ -286,7 +267,11 @@ public class CleanPlanner<T, I, K, O> implements Serializable {
    */
   private List<String> getPartitionPathsForFullCleaning() {
     // Go to brute force mode of scanning all partitions
-    return FSUtils.getAllPartitionPaths(context, config.getMetadataConfig(), config.getBasePath());
+    try {
+      return hoodieTable.getMetadataTable().getAllPartitionPaths();
+    } catch (IOException ioe) {
+      throw new HoodieIOException("Fetching all partitions failed ", ioe);
+    }
   }
 
   /**
@@ -310,8 +295,11 @@ public class CleanPlanner<T, I, K, O> implements Serializable {
    * single file (i.e., run it with versionsRetained = 1)
    */
   private Pair<Boolean, List<CleanFileInfo>> getFilesToCleanKeepingLatestVersions(String partitionPath) {
-    LOG.info("Cleaning " + partitionPath + ", retaining latest " + config.getCleanerFileVersionsRetained()
-        + " file versions. ");
+    LOG.info(
+        "Cleaning {}, retaining latest {} file versions.",
+        partitionPath,
+        config.getCleanerFileVersionsRetained());
+
     List<CleanFileInfo> deletePaths = new ArrayList<>();
     // Collect all the datafiles savepointed by all the savepoints
     List<String> savepointedFiles = hoodieTable.getSavepointTimestamps().stream()
@@ -322,7 +310,7 @@ public class CleanPlanner<T, I, K, O> implements Serializable {
     // In other words, the file versions only apply to the active file groups.
     deletePaths.addAll(getReplacedFilesEligibleToClean(savepointedFiles, partitionPath, Option.empty()));
     boolean toDeletePartition = false;
-    List<HoodieFileGroup> fileGroups = fileSystemView.getAllFileGroupsStateless(partitionPath).collect(Collectors.toList());
+    List<HoodieFileGroup> fileGroups = hoodieTable.getHoodieView().getAllFileGroupsStateless(partitionPath).collect(Collectors.toList());
     for (HoodieFileGroup fileGroup : fileGroups) {
       int keepVersions = config.getCleanerFileVersionsRetained();
       // do not cleanup slice required for pending compaction
@@ -395,12 +383,12 @@ public class CleanPlanner<T, I, K, O> implements Serializable {
 
     // determine if we have enough commits, to start cleaning.
     boolean toDeletePartition = false;
-    if (commitTimeline.countInstants() > commitsRetained) {
+    if (getCommitTimeline().countInstants() > commitsRetained) {
       HoodieInstant earliestInstant = earliestCommitToRetain.get();
       // all replaced file groups before earliestCommitToRetain are eligible to clean
       deletePaths.addAll(getReplacedFilesEligibleToClean(savepointedFiles, partitionPath, earliestCommitToRetain));
       // add active files
-      List<HoodieFileGroup> fileGroups = fileSystemView.getAllFileGroupsStateless(partitionPath).collect(Collectors.toList());
+      List<HoodieFileGroup> fileGroups = hoodieTable.getHoodieView().getAllFileGroupsStateless(partitionPath).collect(Collectors.toList());
       for (HoodieFileGroup fileGroup : fileGroups) {
         List<FileSlice> fileSliceList = fileGroup.getAllFileSlices().collect(Collectors.toList());
 
@@ -432,8 +420,8 @@ public class CleanPlanner<T, I, K, O> implements Serializable {
           }
 
           // Always keep the last commit
-          if (!isFileSliceNeededForPendingMajorOrMinorCompaction(aSlice) && HoodieTimeline
-              .compareTimestamps(earliestInstant.getTimestamp(), HoodieTimeline.GREATER_THAN, fileCommitTime)) {
+          if (!isFileSliceNeededForPendingMajorOrMinorCompaction(aSlice)
+              && compareTimestamps(earliestInstant.requestedTime(), GREATER_THAN, fileCommitTime)) {
             // this is a commit, that should be cleaned.
             aFile.ifPresent(hoodieDataFile -> {
               deletePaths.add(new CleanFileInfo(hoodieDataFile.getPath(), false));
@@ -454,7 +442,7 @@ public class CleanPlanner<T, I, K, O> implements Serializable {
       // mark it to be deleted
       if (fileGroups.isEmpty()
           && !hasPendingFiles(partitionPath)
-          && noSubsequentReplaceCommit(earliestInstant.getTimestamp(), partitionPath)) {
+          && noSubsequentReplaceCommit(earliestInstant.requestedTime(), partitionPath)) {
         toDeletePartition = true;
       }
     }
@@ -471,9 +459,10 @@ public class CleanPlanner<T, I, K, O> implements Serializable {
    */
   private boolean hasPendingFiles(String partitionPath) {
     try {
-      HoodieTableFileSystemView fsView = new HoodieTableFileSystemView(hoodieTable.getMetaClient(), hoodieTable.getActiveTimeline());
-      Path fullPartitionPath = new Path(hoodieTable.getMetaClient().getBasePathV2(), partitionPath);
-      fsView.addFilesToView(FSUtils.getAllDataFilesInPartition(hoodieTable.getMetaClient().getFs(), fullPartitionPath));
+      HoodieTableFileSystemView fsView = HoodieTableFileSystemView.fileListingBasedFileSystemView(context, hoodieTable.getMetaClient(), hoodieTable.getActiveTimeline());
+      StoragePath fullPartitionPath = new StoragePath(hoodieTable.getMetaClient().getBasePath(), partitionPath);
+      fsView.addFilesToView(partitionPath, FSUtils.getAllDataFilesInPartition(
+          hoodieTable.getStorage(), fullPartitionPath));
       // use #getAllFileGroups(partitionPath) instead of #getAllFileGroups() to exclude the replaced file groups.
       return fsView.getAllFileGroups(partitionPath).findAny().isPresent();
     } catch (Exception ex) {
@@ -499,9 +488,9 @@ public class CleanPlanner<T, I, K, O> implements Serializable {
   private List<CleanFileInfo> getReplacedFilesEligibleToClean(List<String> savepointedFiles, String partitionPath, Option<HoodieInstant> earliestCommitToRetain) {
     final Stream<HoodieFileGroup> replacedGroups;
     if (earliestCommitToRetain.isPresent()) {
-      replacedGroups = fileSystemView.getReplacedFileGroupsBefore(earliestCommitToRetain.get().getTimestamp(), partitionPath);
+      replacedGroups = hoodieTable.getHoodieView().getReplacedFileGroupsBefore(earliestCommitToRetain.get().requestedTime(), partitionPath);
     } else {
-      replacedGroups = fileSystemView.getAllReplacedFileGroups(partitionPath);
+      replacedGroups = hoodieTable.getHoodieView().getAllReplacedFileGroups(partitionPath);
     }
     return replacedGroups.flatMap(HoodieFileGroup::getAllFileSlices)
         // do not delete savepointed files  (archival will make sure corresponding replacecommit file is not deleted)
@@ -516,7 +505,7 @@ public class CleanPlanner<T, I, K, O> implements Serializable {
   private String getLatestVersionBeforeCommit(List<FileSlice> fileSliceList, HoodieInstant instantTime) {
     for (FileSlice file : fileSliceList) {
       String fileCommitTime = file.getBaseInstantTime();
-      if (HoodieTimeline.compareTimestamps(instantTime.getTimestamp(), HoodieTimeline.GREATER_THAN, fileCommitTime)) {
+      if (compareTimestamps(instantTime.requestedTime(), GREATER_THAN, fileCommitTime)) {
         // fileList is sorted on the reverse, so the first commit we find <= instantTime is the
         // one we want
         return fileCommitTime;
@@ -570,24 +559,23 @@ public class CleanPlanner<T, I, K, O> implements Serializable {
    * Returns the earliest commit to retain based on cleaning policy.
    */
   public Option<HoodieInstant> getEarliestCommitToRetain() {
-    return CleanerUtils.getEarliestCommitToRetain(
-        hoodieTable.getMetaClient().getActiveTimeline().getCommitsAndCompactionTimeline(),
-        config.getCleanerPolicy(),
-        config.getCleanerCommitsRetained(),
-        Instant.now(),
-        config.getCleanerHoursRetained(),
-        hoodieTable.getMetaClient().getTableConfig().getTimelineTimezone());
+    if (!earliestCommitToRetain.isPresent()) {
+      earliestCommitToRetain = CleanerUtils.getEarliestCommitToRetain(
+          hoodieTable.getMetaClient().getActiveTimeline().getCommitsAndCompactionTimeline(),
+          config.getCleanerPolicy(),
+          config.getCleanerCommitsRetained(),
+          Instant.now(),
+          config.getCleanerHoursRetained(),
+          hoodieTable.getMetaClient().getTableConfig().getTimelineTimezone());
+    }
+    return earliestCommitToRetain;
   }
 
   /**
    * Returns the last completed commit timestamp before clean.
    */
   public String getLastCompletedCommitTimestamp() {
-    if (commitTimeline.lastInstant().isPresent()) {
-      return commitTimeline.lastInstant().get().getTimestamp();
-    } else {
-      return "";
-    }
+    return getCommitTimeline().lastInstant().map(HoodieInstant::requestedTime).orElse("");
   }
 
   /*
@@ -609,7 +597,7 @@ public class CleanPlanner<T, I, K, O> implements Serializable {
     CompactionOperation op = fgIdToPendingCompactionOperations.get(fileSlice.getFileGroupId());
     if (null != op) {
       // If file slice's instant time is newer or same as that of operation, do not clean
-      return HoodieTimeline.compareTimestamps(fileSlice.getBaseInstantTime(), HoodieTimeline.GREATER_THAN_OR_EQUALS, op.getBaseInstantTime()
+      return compareTimestamps(fileSlice.getBaseInstantTime(), GREATER_THAN_OR_EQUALS, op.getBaseInstantTime()
       );
     }
     return false;
@@ -625,7 +613,7 @@ public class CleanPlanner<T, I, K, O> implements Serializable {
     CompactionOperation op = fgIdToPendingLogCompactionOperations.get(fileSlice.getFileGroupId());
     if (null != op) {
       // If file slice's instant time is newer or same as that of operation, do not clean
-      return HoodieTimeline.compareTimestamps(fileSlice.getBaseInstantTime(), HoodieTimeline.GREATER_THAN_OR_EQUALS, op.getBaseInstantTime()
+      return compareTimestamps(fileSlice.getBaseInstantTime(), GREATER_THAN_OR_EQUALS, op.getBaseInstantTime()
       );
     }
     return false;
@@ -637,6 +625,6 @@ public class CleanPlanner<T, I, K, O> implements Serializable {
   }
 
   private boolean noSubsequentReplaceCommit(String earliestCommitToRetain, String partitionPath) {
-    return !fileSystemView.getReplacedFileGroupsAfterOrOn(earliestCommitToRetain, partitionPath).findAny().isPresent();
+    return !hoodieTable.getHoodieView().getReplacedFileGroupsAfterOrOn(earliestCommitToRetain, partitionPath).findAny().isPresent();
   }
 }

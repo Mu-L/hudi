@@ -19,6 +19,7 @@
 package org.apache.hudi.common.table.timeline;
 
 import org.apache.hudi.common.model.HoodieTimelineTimeZone;
+import org.apache.hudi.common.util.VisibleForTesting;
 import org.apache.hudi.exception.HoodieException;
 
 import java.text.ParseException;
@@ -31,6 +32,9 @@ import java.time.temporal.ChronoField;
 import java.time.temporal.TemporalAccessor;
 import java.util.Date;
 import java.util.concurrent.atomic.AtomicReference;
+
+import static org.apache.hudi.common.table.timeline.InstantComparison.LESSER_THAN_OR_EQUALS;
+import static org.apache.hudi.common.table.timeline.InstantComparison.compareTimestamps;
 
 /**
  * Utility class to generate and parse timestamps used in Instants.
@@ -71,7 +75,7 @@ public class HoodieInstantTimeGenerator {
     return lastInstantTime.updateAndGet((oldVal) -> {
       String newCommitTime;
       do {
-        Date d = new Date(timeGenerator.currentTimeMillis(!shouldLock) + milliseconds);
+        Date d = new Date(timeGenerator.generateTime(!shouldLock) + milliseconds);
 
         if (commitTimeZone.equals(HoodieTimelineTimeZone.UTC)) {
           newCommitTime = d.toInstant().atZone(HoodieTimelineTimeZone.UTC.getZoneId())
@@ -79,7 +83,7 @@ public class HoodieInstantTimeGenerator {
         } else {
           newCommitTime = MILLIS_INSTANT_TIME_FORMATTER.format(convertDateToTemporalAccessor(d));
         }
-      } while (HoodieTimeline.compareTimestamps(newCommitTime, HoodieActiveTimeline.LESSER_THAN_OR_EQUALS, oldVal));
+      } while (compareTimestamps(newCommitTime, LESSER_THAN_OR_EQUALS, oldVal));
       return newCommitTime;
     });
   }
@@ -95,32 +99,38 @@ public class HoodieInstantTimeGenerator {
   }
 
   public static String instantTimePlusMillis(String timestamp, long milliseconds) {
+    final String timestampInMillis = fixInstantTimeCompatibility(timestamp);
     try {
-      String timestampInMillis = fixInstantTimeCompatibility(timestamp);
       LocalDateTime dt = LocalDateTime.parse(timestampInMillis, MILLIS_INSTANT_TIME_FORMATTER);
       ZoneId zoneId = HoodieTimelineTimeZone.UTC.equals(commitTimeZone) ? ZoneId.of("UTC") : ZoneId.systemDefault();
       return MILLIS_INSTANT_TIME_FORMATTER.format(dt.atZone(zoneId).toInstant().plusMillis(milliseconds).atZone(zoneId).toLocalDateTime());
     } catch (DateTimeParseException e) {
-      throw new HoodieException(e);
+      // To work with tests, that generate arbitrary timestamps, we need to pad the timestamp with 0s.
+      if (isValidInstantTime(timestamp)) {
+        return String.format("%0" + MILLIS_INSTANT_TIMESTAMP_FORMAT_LENGTH + "d", Long.parseLong(timestamp) + milliseconds);
+      } else {
+        throw new HoodieException(e);
+      }
     }
   }
 
   public static String instantTimeMinusMillis(String timestamp, long milliseconds) {
+    final String timestampInMillis = fixInstantTimeCompatibility(timestamp);
     try {
-      String timestampInMillis = fixInstantTimeCompatibility(timestamp);
-      // To work with tests, that generate arbitrary timestamps, we need to pad the timestamp with 0s.
-      if (timestampInMillis.length() < MILLIS_INSTANT_TIMESTAMP_FORMAT_LENGTH) {
-        return String.format("%0" + timestampInMillis.length() + "d", 0);
-      }
       LocalDateTime dt = LocalDateTime.parse(timestampInMillis, MILLIS_INSTANT_TIME_FORMATTER);
       ZoneId zoneId = HoodieTimelineTimeZone.UTC.equals(commitTimeZone) ? ZoneId.of("UTC") : ZoneId.systemDefault();
       return MILLIS_INSTANT_TIME_FORMATTER.format(dt.atZone(zoneId).toInstant().minusMillis(milliseconds).atZone(zoneId).toLocalDateTime());
     } catch (DateTimeParseException e) {
-      throw new HoodieException(e);
+      // To work with tests, that generate arbitrary timestamps, we need to pad the timestamp with 0s.
+      if (isValidInstantTime(timestamp)) {
+        return String.format("%0" + MILLIS_INSTANT_TIMESTAMP_FORMAT_LENGTH + "d", Long.parseLong(timestamp) - milliseconds);
+      } else {
+        throw new HoodieException(e);
+      }
     }
   }
 
-  private static String fixInstantTimeCompatibility(String instantTime) {
+  public static String fixInstantTimeCompatibility(String instantTime) {
     // Enables backwards compatibility with non-millisecond granularity instants
     if (isSecondGranularity(instantTime)) {
       // Add milliseconds to the instant in order to parse successfully
@@ -143,6 +153,11 @@ public class HoodieInstantTimeGenerator {
 
   public static String getInstantFromTemporalAccessor(TemporalAccessor temporalAccessor) {
     return MILLIS_INSTANT_TIME_FORMATTER.format(temporalAccessor);
+  }
+
+  @VisibleForTesting
+  public static String getLastInstantTime() {
+    return lastInstantTime.get();
   }
 
   /**

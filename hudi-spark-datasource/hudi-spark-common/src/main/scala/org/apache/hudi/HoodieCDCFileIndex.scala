@@ -19,11 +19,11 @@
 
 package org.apache.hudi
 
-import org.apache.hadoop.fs.{FileStatus, Path}
 import org.apache.hudi.cdc.CDCRelation
-import org.apache.hudi.common.model.HoodieFileGroupId
 import org.apache.hudi.common.table.HoodieTableMetaClient
 import org.apache.hudi.common.table.cdc.HoodieCDCExtractor
+
+import org.apache.hadoop.fs.{FileStatus, Path}
 import org.apache.spark.sql.SparkSession
 import org.apache.spark.sql.catalyst.InternalRow
 import org.apache.spark.sql.catalyst.expressions.{Expression, GenericInternalRow}
@@ -31,7 +31,7 @@ import org.apache.spark.sql.execution.datasources.{FileIndex, FileStatusCache, N
 import org.apache.spark.sql.sources.Filter
 import org.apache.spark.sql.types.StructType
 
-import scala.jdk.CollectionConverters.{asScalaBufferConverter, mapAsScalaMapConverter}
+import scala.collection.JavaConverters._
 
 class HoodieCDCFileIndex (override val spark: SparkSession,
                           override val metaClient: HoodieTableMetaClient,
@@ -53,7 +53,7 @@ class HoodieCDCFileIndex (override val spark: SparkSession,
         val partitionPath = if (fileGroupId.getPartitionPath.isEmpty) emptyPartitionPath else fileGroupId.getPartitionPath
         val partitionFields = metaClient.getTableConfig.getPartitionFields
         val partitionValues: InternalRow = if (partitionFields.isPresent) {
-          new GenericInternalRow(doParsePartitionColumnValues(partitionFields.get(), partitionPath).asInstanceOf[Array[Any]])
+          new GenericInternalRow(parsePartitionColumnValues(partitionFields.get(), partitionPath).asInstanceOf[Array[Any]])
         } else {
           InternalRow.empty
         }

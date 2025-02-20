@@ -20,8 +20,6 @@
 
 package org.apache.hudi;
 
-import org.apache.avro.Schema;
-
 import org.apache.hudi.client.SparkRDDWriteClient;
 import org.apache.hudi.common.config.TypedProperties;
 import org.apache.hudi.common.model.FileSlice;
@@ -46,6 +44,7 @@ import org.apache.hudi.table.HoodieTable;
 import org.apache.hudi.testutils.SparkClientFunctionalTestHarness;
 import org.apache.hudi.testutils.SparkDatasetTestUtils;
 
+import org.apache.avro.Schema;
 import org.apache.spark.sql.Dataset;
 import org.apache.spark.sql.Row;
 import org.apache.spark.sql.SQLContext;
@@ -66,7 +65,7 @@ import java.util.stream.Stream;
 import static org.apache.hudi.common.config.HoodieReaderConfig.FILE_GROUP_READER_ENABLED;
 import static org.apache.hudi.common.config.HoodieStorageConfig.LOGFILE_DATA_BLOCK_FORMAT;
 import static org.apache.hudi.common.model.HoodiePayloadProps.PAYLOAD_ORDERING_FIELD_PROP_KEY;
-import static org.apache.hudi.config.HoodieWriteConfig.RECORD_MERGER_IMPLS;
+import static org.apache.hudi.config.HoodieWriteConfig.RECORD_MERGE_IMPL_CLASSES;
 import static org.apache.hudi.config.HoodieWriteConfig.WRITE_RECORD_POSITIONS;
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
@@ -88,8 +87,8 @@ public class TestHoodieMergeHandleWithSparkMerger extends SparkClientFunctionalT
         HoodieTableConfig.BASE_FILE_FORMAT.defaultValue().toString());
     properties.setProperty(HoodieTableConfig.PRECOMBINE_FIELD.key(), "record_key");
     properties.setProperty(KeyGeneratorOptions.PARTITIONPATH_FIELD_NAME.key(),"partition_path");
-    properties.setProperty(HoodieTableConfig.PARTITION_FIELDS.key(),"partition_path");
-    metaClient = getHoodieMetaClient(hadoopConf(), basePath(), HoodieTableType.MERGE_ON_READ, properties);
+    properties.setProperty(HoodieTableConfig.PARTITION_FIELDS.key(), "partition_path");
+    metaClient = getHoodieMetaClient(storageConf(), basePath(), HoodieTableType.MERGE_ON_READ, properties);
   }
 
   @Test
@@ -144,7 +143,7 @@ public class TestHoodieMergeHandleWithSparkMerger extends SparkClientFunctionalT
   public List<HoodieRecord> generateEmptyRecords(List<HoodieKey> keys) {
     List<HoodieRecord> records = new ArrayList<>();
     for (HoodieKey key : keys) {
-      records.add(new HoodieEmptyRecord(key, HoodieOperation.DELETE, 1, HoodieRecord.HoodieRecordType.SPARK));
+      records.add(new HoodieEmptyRecord(key, HoodieOperation.DELETE, key.getRecordKey(), HoodieRecord.HoodieRecordType.SPARK));
     }
     return records;
   }
@@ -160,8 +159,8 @@ public class TestHoodieMergeHandleWithSparkMerger extends SparkClientFunctionalT
   public HoodieWriteConfig getWriteConfig(Schema avroSchema) {
     Properties extraProperties = new Properties();
     extraProperties.setProperty(
-        RECORD_MERGER_IMPLS.key(),
-        "org.apache.hudi.HoodieSparkRecordMerger");
+        RECORD_MERGE_IMPL_CLASSES.key(),
+        "org.apache.hudi.DefaultSparkRecordMerger");
     extraProperties.setProperty(
         LOGFILE_DATA_BLOCK_FORMAT.key(),
         "parquet");
@@ -198,7 +197,7 @@ public class TestHoodieMergeHandleWithSparkMerger extends SparkClientFunctionalT
   }
 
   public HoodieTableFileSystemView getFileSystemView() {
-    return new HoodieTableFileSystemView(metaClient, metaClient.getActiveTimeline());
+    return HoodieTableFileSystemView.fileListingBasedFileSystemView(context(), metaClient, metaClient.getActiveTimeline());
   }
 
   public List<FileSlice> getLatestFileSlices(String partitionPath) {
@@ -229,8 +228,8 @@ public class TestHoodieMergeHandleWithSparkMerger extends SparkClientFunctionalT
   public void checkDataEquality(int numRecords) {
     Map<String, String> properties = new HashMap<>();
     properties.put(
-        RECORD_MERGER_IMPLS.key(),
-        "org.apache.hudi.HoodieSparkRecordMerger");
+        RECORD_MERGE_IMPL_CLASSES.key(),
+        "org.apache.hudi.DefaultSparkRecordMerger");
     properties.put(
         LOGFILE_DATA_BLOCK_FORMAT.key(),
         "parquet");
@@ -271,7 +270,7 @@ public class TestHoodieMergeHandleWithSparkMerger extends SparkClientFunctionalT
       // Check metadata files.
       Option<HoodieInstant> deltaCommit = reloadedMetaClient.getActiveTimeline().getDeltaCommitTimeline().lastInstant();
       assertTrue(deltaCommit.isPresent());
-      assertEquals(instantTime, deltaCommit.get().getTimestamp(), "Delta commit should be specified value");
+      assertEquals(instantTime, deltaCommit.get().requestedTime(), "Delta commit should be specified value");
 
       // Check data files.
       List<String> fileIds = getFileIds(getPartitionPath());
@@ -362,21 +361,21 @@ public class TestHoodieMergeHandleWithSparkMerger extends SparkClientFunctionalT
     }
   }
 
-  public static class DefaultMerger extends HoodieSparkRecordMerger {
+  public static class DefaultMerger extends DefaultSparkRecordMerger {
     @Override
     public boolean shouldFlush(HoodieRecord record, Schema schema, TypedProperties props) {
       return true;
     }
   }
 
-  public static class NoFlushMerger extends HoodieSparkRecordMerger {
+  public static class NoFlushMerger extends DefaultSparkRecordMerger {
     @Override
     public boolean shouldFlush(HoodieRecord record, Schema schema, TypedProperties props) {
       return false;
     }
   }
 
-  public static class CustomMerger extends HoodieSparkRecordMerger {
+  public static class CustomMerger extends DefaultSparkRecordMerger {
     @Override
     public boolean shouldFlush(HoodieRecord record, Schema schema, TypedProperties props) throws IOException {
       return !((HoodieSparkRecord) record).getData().getString(0).equals("001");

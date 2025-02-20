@@ -24,18 +24,19 @@ import org.apache.hudi.common.model.HoodieCommitMetadata;
 import org.apache.hudi.common.model.HoodieFileFormat;
 import org.apache.hudi.common.model.HoodiePartitionMetadata;
 import org.apache.hudi.common.model.HoodieWriteStat;
+import org.apache.hudi.common.table.HoodieTableConfig;
 import org.apache.hudi.common.table.HoodieTableMetaClient;
-import org.apache.hudi.common.table.timeline.HoodieTimeline;
 import org.apache.hudi.common.testutils.InProcessTimeGenerator;
 import org.apache.hudi.common.util.CollectionUtils;
 import org.apache.hudi.common.util.collection.ImmutablePair;
 import org.apache.hudi.common.util.collection.Pair;
 import org.apache.hudi.exception.HoodieException;
-import org.apache.hudi.hadoop.fs.HadoopFSUtils;
 
-import org.apache.hadoop.conf.Configuration;
-import org.apache.hadoop.fs.FileSystem;
-import org.apache.hadoop.fs.Path;
+import org.apache.hudi.storage.HoodieStorage;
+import org.apache.hudi.storage.HoodieStorageUtils;
+import org.apache.hudi.storage.StorageConfiguration;
+import org.apache.hudi.storage.StoragePath;
+import org.apache.hudi.storage.hadoop.HadoopStorageConfiguration;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
@@ -54,6 +55,8 @@ import java.util.UUID;
 
 import static org.apache.hudi.common.table.log.HoodieLogFormat.DEFAULT_WRITE_TOKEN;
 import static org.apache.hudi.common.table.timeline.TimelineMetadataUtils.serializeCommitMetadata;
+import static org.apache.hudi.common.testutils.HoodieTestUtils.COMMIT_METADATA_SER_DE;
+import static org.apache.hudi.common.testutils.HoodieTestUtils.INSTANT_FILE_NAME_GENERATOR;
 
 public class HoodieTestCommitGenerator {
   public static final String BASE_FILE_WRITE_TOKEN = "1-0-1";
@@ -111,7 +114,7 @@ public class HoodieTestCommitGenerator {
   }
 
   public static String getBaseFilename(String instantTime, String fileId) {
-    return FSUtils.makeBaseFileName(instantTime, BASE_FILE_WRITE_TOKEN, fileId);
+    return FSUtils.makeBaseFileName(instantTime, BASE_FILE_WRITE_TOKEN, fileId, HoodieTableConfig.BASE_FILE_FORMAT.defaultValue().getFileExtension());
   }
 
   public static String getLogFilename(String instantTime, String fileId) {
@@ -122,17 +125,17 @@ public class HoodieTestCommitGenerator {
   public static void createCommitAndDataFiles(
       String basePath, String instantTime,
       Map<String, List<Pair<String, String>>> partitionPathToFileIdAndNameMap) throws IOException {
-    String commitFilename = HoodieTimeline.makeCommitFileName(instantTime + "_" + InProcessTimeGenerator.createNewInstantTime());
+    String commitFilename = INSTANT_FILE_NAME_GENERATOR.makeCommitFileName(instantTime + "_" + InProcessTimeGenerator.createNewInstantTime());
     HoodieCommitMetadata commitMetadata =
         generateCommitMetadata(partitionPathToFileIdAndNameMap, Collections.emptyMap());
-    createCommitFileWithMetadata(basePath, new Configuration(), commitFilename, serializeCommitMetadata(commitMetadata).get());
+    createCommitFileWithMetadata(basePath, new HadoopStorageConfiguration(true), commitFilename, serializeCommitMetadata(COMMIT_METADATA_SER_DE, commitMetadata).get());
     for (String partitionPath : partitionPathToFileIdAndNameMap.keySet()) {
       createPartitionMetaFile(basePath, partitionPath);
       partitionPathToFileIdAndNameMap.get(partitionPath)
           .forEach(fileInfo -> {
             String filename = fileInfo.getValue();
             try {
-              createDataFile(basePath, new Configuration(), partitionPath, filename);
+              createDataFile(basePath, new HadoopStorageConfiguration(true), partitionPath, filename);
             } catch (IOException e) {
               LOG.error(String.format("Failed to create data file: %s/%s/%s",
                   basePath, partitionPath, filename));
@@ -152,7 +155,7 @@ public class HoodieTestCommitGenerator {
         fileInfoList.forEach(fileInfo -> {
           HoodieWriteStat writeStat = new HoodieWriteStat();
           writeStat.setPartitionPath(partitionPath);
-          writeStat.setPath(new Path(partitionPath, fileInfo.getValue()).toString());
+          writeStat.setPath(new StoragePath(partitionPath, fileInfo.getValue()).toString());
           writeStat.setFileId(fileInfo.getKey());
           // Below are dummy values
           writeStat.setTotalWriteBytes(10000);
@@ -167,25 +170,26 @@ public class HoodieTestCommitGenerator {
   }
 
   public static void createCommitFileWithMetadata(
-      String basePath, Configuration configuration,
+      String basePath, StorageConfiguration<?> storageConf,
       String filename, byte[] content) throws IOException {
-    Path commitFilePath = new Path(basePath + "/" + HoodieTableMetaClient.METAFOLDER_NAME + "/" + filename);
-    try (OutputStream os = HadoopFSUtils.getFs(basePath, configuration).create(commitFilePath, true)) {
+    HoodieStorage storage = HoodieStorageUtils.getStorage(basePath, storageConf);
+    StoragePath commitFilePath = new StoragePath(basePath + "/" + HoodieTableMetaClient.METAFOLDER_NAME + "/" + HoodieTableMetaClient.TIMELINEFOLDER_NAME + "/" + filename);
+    try (OutputStream os = storage.create(commitFilePath, true)) {
       os.write(content);
     }
   }
 
   public static void createDataFile(
-      String basePath, Configuration configuration,
+      String basePath, StorageConfiguration<?> storageConf,
       String partitionPath, String filename) throws IOException {
-    FileSystem fs = HadoopFSUtils.getFs(basePath, configuration);
-    Path filePath = new Path(new Path(basePath, partitionPath), filename);
-    Path parent = filePath.getParent();
-    if (!fs.exists(parent)) {
-      fs.mkdirs(parent);
+    HoodieStorage storage = HoodieStorageUtils.getStorage(basePath, storageConf);
+    StoragePath filePath = new StoragePath(new StoragePath(basePath, partitionPath), filename);
+    StoragePath parent = filePath.getParent();
+    if (!storage.exists(parent)) {
+      storage.createDirectory(parent);
     }
-    if (!fs.exists(filePath)) {
-      fs.create(filePath);
+    if (!storage.exists(filePath)) {
+      storage.create(filePath);
     }
   }
 

@@ -26,19 +26,23 @@ import org.apache.hudi.common.model.HoodieRecord;
 import org.apache.hudi.common.model.HoodieTableType;
 import org.apache.hudi.common.model.HoodieWriteStat;
 import org.apache.hudi.common.table.HoodieTableMetaClient;
-import org.apache.hudi.common.table.timeline.HoodieTimeline;
 import org.apache.hudi.common.testutils.HoodieTestDataGenerator;
 import org.apache.hudi.common.testutils.HoodieTestUtils;
 import org.apache.hudi.common.util.ClusteringUtils;
 import org.apache.hudi.common.util.Option;
+import org.apache.hudi.common.util.ParquetUtils;
 import org.apache.hudi.common.util.collection.Pair;
 import org.apache.hudi.config.HoodieClusteringConfig;
 import org.apache.hudi.config.HoodieWriteConfig;
 import org.apache.hudi.keygen.constant.KeyGeneratorOptions;
+import org.apache.hudi.storage.StoragePath;
 import org.apache.hudi.table.action.HoodieWriteMetadata;
 import org.apache.hudi.table.action.cluster.ClusteringPlanPartitionFilterMode;
 import org.apache.hudi.testutils.HoodieSparkClientTestHarness;
 import org.apache.hudi.testutils.MetadataMergeWriteStatus;
+
+import org.apache.parquet.schema.MessageType;
+import org.apache.parquet.schema.Type;
 import org.apache.spark.api.java.JavaRDD;
 import org.apache.spark.sql.Dataset;
 import org.apache.spark.sql.Row;
@@ -52,6 +56,9 @@ import java.util.List;
 import java.util.Map;
 import java.util.Properties;
 import java.util.stream.Collectors;
+
+import static org.apache.hudi.common.testutils.HoodieTestUtils.INSTANT_GENERATOR;
+import static org.junit.jupiter.api.Assertions.assertEquals;
 
 public class TestSparkSortAndSizeClustering extends HoodieSparkClientTestHarness {
 
@@ -67,11 +74,11 @@ public class TestSparkSortAndSizeClustering extends HoodieSparkClientTestHarness
     initPath();
     initSparkContexts();
     initTestDataGenerator();
-    initFileSystem();
+    initHoodieStorage();
     Properties props = getPropertiesForKeyGen(true);
     props.putAll(options);
     props.setProperty(KeyGeneratorOptions.RECORDKEY_FIELD_NAME.key(), "_row_key");
-    metaClient = HoodieTestUtils.init(hadoopConf, basePath, HoodieTableType.COPY_ON_WRITE, props);
+    metaClient = HoodieTestUtils.init(storageConf, basePath, HoodieTableType.COPY_ON_WRITE, props);
     config = getConfigBuilder().withProps(props)
         .withAutoCommit(false)
         .withStorageConfig(HoodieStorageConfig.newBuilder().parquetMaxFileSize(maxFileSize).build())
@@ -111,20 +118,33 @@ public class TestSparkSortAndSizeClustering extends HoodieSparkClientTestHarness
 
     String clusteringTime = (String) writeClient.scheduleClustering(Option.empty()).get();
     HoodieClusteringPlan plan = ClusteringUtils.getClusteringPlan(
-        metaClient, HoodieTimeline.getReplaceCommitRequestedInstant(clusteringTime)).map(Pair::getRight).get();
+        metaClient, INSTANT_GENERATOR.getClusteringCommitRequestedInstant(clusteringTime)).map(Pair::getRight).get();
 
     List<HoodieClusteringGroup> inputGroups = plan.getInputGroups();
-    Assertions.assertEquals(1, inputGroups.size(), "Clustering plan will contain 1 input group");
+    assertEquals(1, inputGroups.size(), "Clustering plan will contain 1 input group");
 
     Integer outputFileGroups = plan.getInputGroups().get(0).getNumOutputFileGroups();
-    Assertions.assertEquals(2, outputFileGroups, "Clustering plan will generate 2 output groups");
+    assertEquals(2, outputFileGroups, "Clustering plan will generate 2 output groups");
 
     HoodieWriteMetadata writeMetadata = writeClient.cluster(clusteringTime, true);
     List<HoodieWriteStat> writeStats = (List<HoodieWriteStat>)writeMetadata.getWriteStats().get();
-    Assertions.assertEquals(2, writeStats.size(), "Clustering should write 2 files");
+    assertEquals(2, writeStats.size(), "Clustering should write 2 files");
 
     List<Row> rows = readRecords();
-    Assertions.assertEquals(numRecords, rows.size());
+    assertEquals(numRecords, rows.size());
+    validateDecimalTypeAfterClustering(writeStats);
+  }
+
+  // Validate that clustering produces decimals in legacy format
+  private void validateDecimalTypeAfterClustering(List<HoodieWriteStat> writeStats) {
+    writeStats.stream().map(writeStat -> new StoragePath(metaClient.getBasePath(), writeStat.getPath())).forEach(writtenPath -> {
+      MessageType schema = ParquetUtils.readMetadata(storage, writtenPath)
+          .getFileMetaData().getSchema();
+      int index = schema.getFieldIndex("height");
+      Type decimalType = schema.getFields().get(index);
+      assertEquals("DECIMAL", decimalType.getOriginalType().toString());
+      assertEquals("FIXED_LEN_BYTE_ARRAY", decimalType.asPrimitiveType().getPrimitiveTypeName().toString());
+    });
   }
 
   private List<WriteStatus> writeData(String commitTime, int totalRecords, boolean doCommit) {
@@ -137,7 +157,7 @@ public class TestSparkSortAndSizeClustering extends HoodieSparkClientTestHarness
     org.apache.hudi.testutils.Assertions.assertNoWriteErrors(writeStatues);
 
     if (doCommit) {
-      Assertions.assertTrue(writeClient.commitStats(commitTime, context.parallelize(writeStatues, 1), writeStatues.stream().map(WriteStatus::getStat).collect(Collectors.toList()),
+      Assertions.assertTrue(writeClient.commitStats(commitTime, writeStatues.stream().map(WriteStatus::getStat).collect(Collectors.toList()),
           Option.empty(), metaClient.getCommitActionType()));
     }
 
@@ -146,10 +166,7 @@ public class TestSparkSortAndSizeClustering extends HoodieSparkClientTestHarness
   }
 
   private List<Row> readRecords() {
-    Dataset<Row> roViewDF = sparkSession
-        .read()
-        .format("hudi")
-        .load(basePath + "/*/*/*/*");
+    Dataset<Row> roViewDF = sparkSession.read().format("hudi").load(basePath);
     roViewDF.createOrReplaceTempView("clutering_table");
     return sparkSession.sqlContext().sql("select * from clutering_table").collectAsList();
   }

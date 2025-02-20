@@ -24,41 +24,60 @@ import org.apache.hudi.common.config.HoodieStorageConfig;
 import org.apache.hudi.common.engine.TaskContextSupplier;
 import org.apache.hudi.common.table.HoodieTableConfig;
 import org.apache.hudi.common.util.Option;
+import org.apache.hudi.common.util.StringUtils;
 import org.apache.hudi.exception.HoodieIOException;
 import org.apache.hudi.io.storage.row.HoodieRowParquetConfig;
 import org.apache.hudi.io.storage.row.HoodieRowParquetWriteSupport;
+import org.apache.hudi.storage.HoodieStorage;
+import org.apache.hudi.storage.StorageConfiguration;
+import org.apache.hudi.storage.StoragePath;
 
 import org.apache.avro.Schema;
 import org.apache.hadoop.conf.Configuration;
 import org.apache.hadoop.fs.FSDataOutputStream;
-import org.apache.hadoop.fs.Path;
 import org.apache.parquet.hadoop.metadata.CompressionCodecName;
+import org.apache.spark.sql.HoodieDataTypeUtils;
 import org.apache.spark.sql.HoodieInternalRowUtils;
+import org.apache.spark.sql.types.StructType;
 
 import java.io.IOException;
+import java.io.OutputStream;
+
+import static org.apache.hudi.config.HoodieWriteConfig.AVRO_SCHEMA_STRING;
+import static org.apache.hudi.config.HoodieWriteConfig.WRITE_SCHEMA_OVERRIDE;
 
 public class HoodieSparkFileWriterFactory extends HoodieFileWriterFactory {
 
+  public HoodieSparkFileWriterFactory(HoodieStorage storage) {
+    super(storage);
+  }
+
   @Override
   protected HoodieFileWriter newParquetFileWriter(
-      String instantTime, Path path, Configuration conf, HoodieConfig config, Schema schema,
+      String instantTime, StoragePath path, HoodieConfig config, Schema schema,
       TaskContextSupplier taskContextSupplier) throws IOException {
+    String writeSchema = config.getStringOrDefault(
+        WRITE_SCHEMA_OVERRIDE, config.getString(AVRO_SCHEMA_STRING));
+    if (!StringUtils.isNullOrEmpty(writeSchema)) {
+      // The parquet write legacy format property needs to be overridden
+      // if there is a decimal field of small precision, to maintain the compatibility.
+      HoodieDataTypeUtils.tryOverrideParquetWriteLegacyFormatProperty(
+          config.getProps(), new Schema.Parser().parse(writeSchema));
+    }
     boolean populateMetaFields = config.getBooleanOrDefault(HoodieTableConfig.POPULATE_META_FIELDS);
-    Option<BloomFilter> filter = enableBloomFilter(populateMetaFields, config) ? Option.of(createBloomFilter(config)) : Option.empty();
     String compressionCodecName = config.getStringOrDefault(HoodieStorageConfig.PARQUET_COMPRESSION_CODEC_NAME);
     // Support PARQUET_COMPRESSION_CODEC_NAME is ""
     if (compressionCodecName.isEmpty()) {
       compressionCodecName = null;
     }
-    HoodieRowParquetWriteSupport writeSupport = new HoodieRowParquetWriteSupport(conf,
-        HoodieInternalRowUtils.getCachedSchema(schema), filter,
-        HoodieStorageConfig.newBuilder().fromProperties(config.getProps()).build());
+    HoodieRowParquetWriteSupport writeSupport = getHoodieRowParquetWriteSupport(storage.getConf(), schema,
+        config, enableBloomFilter(populateMetaFields, config));
     HoodieRowParquetConfig parquetConfig = new HoodieRowParquetConfig(writeSupport,
         CompressionCodecName.fromConf(compressionCodecName),
         config.getIntOrDefault(HoodieStorageConfig.PARQUET_BLOCK_SIZE),
         config.getIntOrDefault(HoodieStorageConfig.PARQUET_PAGE_SIZE),
         config.getLongOrDefault(HoodieStorageConfig.PARQUET_MAX_FILE_SIZE),
-        conf,
+        storage.getConf().unwrapAs(Configuration.class),
         config.getDoubleOrDefault(HoodieStorageConfig.PARQUET_COMPRESSION_RATIO_FRACTION),
         config.getBooleanOrDefault(HoodieStorageConfig.PARQUET_DICTIONARY_ENABLED));
     parquetConfig.getHadoopConf().addResource(writeSupport.getHadoopConf());
@@ -66,13 +85,10 @@ public class HoodieSparkFileWriterFactory extends HoodieFileWriterFactory {
     return new HoodieSparkParquetWriter(path, parquetConfig, instantTime, taskContextSupplier, populateMetaFields);
   }
 
-  protected HoodieFileWriter newParquetFileWriter(
-      FSDataOutputStream outputStream, Configuration conf, HoodieConfig config, Schema schema) throws IOException {
+  protected HoodieFileWriter newParquetFileWriter(OutputStream outputStream, HoodieConfig config,
+                                                  Schema schema) throws IOException {
     boolean enableBloomFilter = false;
-    Option<BloomFilter> filter = enableBloomFilter ? Option.of(createBloomFilter(config)) : Option.empty();
-    HoodieRowParquetWriteSupport writeSupport = new HoodieRowParquetWriteSupport(conf,
-        HoodieInternalRowUtils.getCachedSchema(schema), filter,
-        HoodieStorageConfig.newBuilder().fromProperties(config.getProps()).build());
+    HoodieRowParquetWriteSupport writeSupport = getHoodieRowParquetWriteSupport(storage.getConf(), schema, config, enableBloomFilter);
     String compressionCodecName = config.getStringOrDefault(HoodieStorageConfig.PARQUET_COMPRESSION_CODEC_NAME);
     // Support PARQUET_COMPRESSION_CODEC_NAME is ""
     if (compressionCodecName.isEmpty()) {
@@ -86,18 +102,25 @@ public class HoodieSparkFileWriterFactory extends HoodieFileWriterFactory {
         writeSupport.getHadoopConf(), config.getDouble(HoodieStorageConfig.PARQUET_COMPRESSION_RATIO_FRACTION),
         config.getBooleanOrDefault(HoodieStorageConfig.PARQUET_DICTIONARY_ENABLED));
     parquetConfig.getHadoopConf().addResource(writeSupport.getHadoopConf());
-    return new HoodieSparkParquetStreamWriter(outputStream, parquetConfig);
+    return new HoodieSparkParquetStreamWriter(new FSDataOutputStream(outputStream, null), parquetConfig);
   }
 
   @Override
-  protected HoodieFileWriter newHFileFileWriter(String instantTime, Path path, Configuration conf, HoodieConfig config, Schema schema,
-      TaskContextSupplier taskContextSupplier) throws IOException {
+  protected HoodieFileWriter newHFileFileWriter(String instantTime, StoragePath path, HoodieConfig config, Schema schema,
+                                                TaskContextSupplier taskContextSupplier) throws IOException {
     throw new HoodieIOException("Not support write to HFile");
   }
 
   @Override
-  protected HoodieFileWriter newOrcFileWriter(String instantTime, Path path, Configuration conf, HoodieConfig config, Schema schema,
-      TaskContextSupplier taskContextSupplier) throws IOException {
+  protected HoodieFileWriter newOrcFileWriter(String instantTime, StoragePath path, HoodieConfig config, Schema schema,
+                                              TaskContextSupplier taskContextSupplier) throws IOException {
     throw new HoodieIOException("Not support write to Orc file");
+  }
+
+  private static HoodieRowParquetWriteSupport getHoodieRowParquetWriteSupport(StorageConfiguration<?> conf, Schema schema,
+                                                                              HoodieConfig config, boolean enableBloomFilter) {
+    Option<BloomFilter> filter = enableBloomFilter ? Option.of(createBloomFilter(config)) : Option.empty();
+    StructType structType = HoodieInternalRowUtils.getCachedSchema(schema);
+    return HoodieRowParquetWriteSupport.getHoodieRowParquetWriteSupport(conf.unwrapAs(Configuration.class), structType, filter, config);
   }
 }

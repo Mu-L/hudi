@@ -19,11 +19,15 @@
 
 package org.apache.hudi.utilities.streamer;
 
+import org.apache.hudi.ApiMaturityLevel;
+import org.apache.hudi.PublicAPIClass;
+import org.apache.hudi.PublicAPIMethod;
 import org.apache.hudi.client.common.HoodieSparkEngineContext;
 import org.apache.hudi.common.config.TypedProperties;
 import org.apache.hudi.common.model.HoodieAvroRecord;
 import org.apache.hudi.common.util.Option;
 import org.apache.hudi.common.util.VisibleForTesting;
+import org.apache.hudi.utilities.ingestion.HoodieIngestionMetrics;
 
 import org.apache.hadoop.fs.FileSystem;
 import org.apache.spark.api.java.JavaRDD;
@@ -40,6 +44,7 @@ import java.io.Serializable;
  *
  * The writer can use the configs defined in HoodieErrorTableConfig to manage the error table.
  */
+@PublicAPIClass(maturity = ApiMaturityLevel.EVOLVING)
 public abstract class BaseErrorTableWriter<T extends ErrorEvent> implements Serializable {
 
   // The column name passed to Spark for option `columnNameOfCorruptRecord`. The record
@@ -47,7 +52,15 @@ public abstract class BaseErrorTableWriter<T extends ErrorEvent> implements Seri
   public static String ERROR_TABLE_CURRUPT_RECORD_COL_NAME = "_corrupt_record";
 
   public BaseErrorTableWriter(HoodieStreamer.Config cfg, SparkSession sparkSession,
-                                   TypedProperties props, HoodieSparkEngineContext hoodieSparkContext, FileSystem fs) {
+                              TypedProperties props, HoodieSparkEngineContext hoodieSparkContext, FileSystem fileSystem) {
+  }
+
+  public BaseErrorTableWriter(HoodieStreamer.Config cfg,
+                              SparkSession sparkSession,
+                              TypedProperties props,
+                              HoodieSparkEngineContext hoodieSparkContext,
+                              FileSystem fs,
+                              Option<HoodieIngestionMetrics> metrics) {
   }
 
   /**
@@ -56,18 +69,20 @@ public abstract class BaseErrorTableWriter<T extends ErrorEvent> implements Seri
    *
    * @param errorEvent Input error event RDD
    */
+  @PublicAPIMethod(maturity = ApiMaturityLevel.EVOLVING)
   public abstract void addErrorEvents(JavaRDD<T> errorEvent);
 
   /**
    * Fetches the error events RDD processed by the writer so far. This is a test API.
    */
   @VisibleForTesting
+  @PublicAPIMethod(maturity = ApiMaturityLevel.EVOLVING)
   public abstract Option<JavaRDD<HoodieAvroRecord>> getErrorEvents(String baseTableInstantTime, Option<String> commitedInstantTime);
 
   /**
    * This API is called to commit the error events (failed Hoodie Records) processed by the writer so far.
    * These records are committed to a error table.
    */
+  @PublicAPIMethod(maturity = ApiMaturityLevel.EVOLVING)
   public abstract boolean upsertAndCommit(String baseTableInstantTime, Option<String> commitedInstantTime);
-
 }

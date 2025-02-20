@@ -18,19 +18,21 @@
 
 package org.apache.hudi.functional;
 
+import org.apache.hudi.DataSourceReadOptions;
 import org.apache.hudi.common.config.HoodieReaderConfig;
 import org.apache.hudi.common.model.HoodieTableType;
 
 import org.apache.spark.sql.Dataset;
 import org.apache.spark.sql.Row;
 import org.apache.spark.sql.SaveMode;
-import org.junit.jupiter.api.Disabled;
 import org.junit.jupiter.api.Tag;
 import org.junit.jupiter.params.ParameterizedTest;
 import org.junit.jupiter.params.provider.Arguments;
 import org.junit.jupiter.params.provider.MethodSource;
 
+import java.util.ArrayList;
 import java.util.Arrays;
+import java.util.List;
 import java.util.Map;
 import java.util.stream.Stream;
 
@@ -39,18 +41,13 @@ import static org.apache.hudi.common.model.HoodieTableType.MERGE_ON_READ;
 import static org.junit.jupiter.api.Assertions.assertEquals;
 
 @Tag("functional")
-@Disabled("HUDI-6756")
 public class TestNewHoodieParquetFileFormat extends TestBootstrapReadBase {
 
   private static Stream<Arguments> testArgs() {
     Stream.Builder<Arguments> b = Stream.builder();
-    HoodieTableType[] tableType = {COPY_ON_WRITE, MERGE_ON_READ};
-    Integer[] nPartitions = {0, 1, 2};
-    for (HoodieTableType tt : tableType) {
-      for (Integer n : nPartitions) {
-        b.add(Arguments.of(tt, n));
-      }
-    }
+    b.add(Arguments.of(MERGE_ON_READ, 0));
+    b.add(Arguments.of(COPY_ON_WRITE, 1));
+    b.add(Arguments.of(MERGE_ON_READ, 2));
     return b.build();
   }
 
@@ -120,25 +117,42 @@ public class TestNewHoodieParquetFileFormat extends TestBootstrapReadBase {
   }
 
   protected void runIndividualComparison(String tableBasePath, String firstColumn, String... columns) {
-    Dataset<Row> legacyDf = sparkSession.read().format("hudi")
-        .option(HoodieReaderConfig.FILE_GROUP_READER_ENABLED.key(), "false")
-        .load(tableBasePath);
-    Dataset<Row> fileFormatDf = sparkSession.read().format("hudi")
-        .option(HoodieReaderConfig.FILE_GROUP_READER_ENABLED.key(), "true")
-        .load(tableBasePath);
-    if (firstColumn.isEmpty()) {
-      //df.except(df) does not work with map type cols
-      legacyDf = legacyDf.drop("city_to_state");
-      fileFormatDf = fileFormatDf.drop("city_to_state");
-    } else {
-      if (columns.length > 0) {
-        legacyDf = legacyDf.select(firstColumn, columns);
-        fileFormatDf = fileFormatDf.select(firstColumn, columns);
-      } else {
-        legacyDf = legacyDf.select(firstColumn);
-        fileFormatDf = fileFormatDf.select(firstColumn);
-      }
+    List<String> queryTypes = new ArrayList<>();
+    queryTypes.add(DataSourceReadOptions.QUERY_TYPE_SNAPSHOT_OPT_VAL());
+    if (tableType.equals(MERGE_ON_READ)) {
+      queryTypes.add(DataSourceReadOptions.QUERY_TYPE_READ_OPTIMIZED_OPT_VAL());
     }
-    compareDf(legacyDf, fileFormatDf);
+    for (String queryType : queryTypes) {
+      Dataset<Row> legacyDf = sparkSession.read().format("hudi")
+          .option(HoodieReaderConfig.FILE_GROUP_READER_ENABLED.key(), "false")
+          .option(DataSourceReadOptions.QUERY_TYPE().key(), queryType)
+          .load(tableBasePath);
+      Dataset<Row> fileFormatDf = sparkSession.read().format("hudi")
+          .option(HoodieReaderConfig.FILE_GROUP_READER_ENABLED.key(), "true")
+          .option(DataSourceReadOptions.QUERY_TYPE().key(), queryType)
+          .load(tableBasePath);
+      if (firstColumn.isEmpty()) {
+        //df.except(df) does not work with map type cols
+        legacyDf = legacyDf.drop("city_to_state");
+        fileFormatDf = fileFormatDf.drop("city_to_state");
+
+        //TODO: [HUDI-3204] for toHadoopFs in BaseFileOnlyRelation, the partition columns will be at the end
+        //so just drop column that is out of order here for now
+        if (queryType.equals(DataSourceReadOptions.QUERY_TYPE_READ_OPTIMIZED_OPT_VAL())
+            && tableType.equals(MERGE_ON_READ) && nPartitions > 0) {
+          legacyDf = legacyDf.drop("partition_path");
+          fileFormatDf = fileFormatDf.drop("partition_path");
+        }
+      } else {
+        if (columns.length > 0) {
+          legacyDf = legacyDf.select(firstColumn, columns);
+          fileFormatDf = fileFormatDf.select(firstColumn, columns);
+        } else {
+          legacyDf = legacyDf.select(firstColumn);
+          fileFormatDf = fileFormatDf.select(firstColumn);
+        }
+      }
+      compareDf(legacyDf, fileFormatDf);
+    }
   }
 }

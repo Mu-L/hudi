@@ -20,8 +20,10 @@ package org.apache.hudi.testutils;
 
 import org.apache.hudi.client.common.HoodieJavaEngineContext;
 import org.apache.hudi.client.timeline.HoodieTimelineArchiver;
+import org.apache.hudi.client.timeline.versioning.v2.TimelineArchiverV2;
 import org.apache.hudi.common.config.HoodieMetadataConfig;
 import org.apache.hudi.common.config.HoodieStorageConfig;
+import org.apache.hudi.common.engine.EngineType;
 import org.apache.hudi.common.model.HoodieFailedWritesCleaningPolicy;
 import org.apache.hudi.common.model.HoodieTableType;
 import org.apache.hudi.common.model.WriteOperationType;
@@ -29,6 +31,7 @@ import org.apache.hudi.common.table.HoodieTableMetaClient;
 import org.apache.hudi.common.table.view.FileSystemViewStorageConfig;
 import org.apache.hudi.common.testutils.HoodieMetadataTestTable;
 import org.apache.hudi.common.testutils.HoodieTestTable;
+import org.apache.hudi.common.testutils.HoodieTestUtils;
 import org.apache.hudi.common.util.Option;
 import org.apache.hudi.config.HoodieCleanConfig;
 import org.apache.hudi.config.HoodieCompactionConfig;
@@ -41,11 +44,10 @@ import org.apache.hudi.metadata.HoodieTableMetadata;
 import org.apache.hudi.metadata.HoodieTableMetadataWriter;
 import org.apache.hudi.metadata.JavaHoodieBackedTableMetadataWriter;
 import org.apache.hudi.metrics.MetricsReporterType;
+import org.apache.hudi.storage.StoragePath;
 import org.apache.hudi.table.HoodieJavaTable;
 import org.apache.hudi.table.HoodieTable;
 
-import org.apache.hadoop.conf.Configuration;
-import org.apache.hadoop.fs.Path;
 import org.junit.jupiter.api.AfterEach;
 import org.junit.jupiter.api.BeforeEach;
 
@@ -60,6 +62,7 @@ import static java.util.Collections.emptyList;
 import static org.apache.hudi.common.model.WriteOperationType.INSERT;
 import static org.apache.hudi.common.model.WriteOperationType.UPSERT;
 import static org.apache.hudi.common.testutils.HoodieTestDataGenerator.TRIP_EXAMPLE_SCHEMA;
+import static org.apache.hudi.common.testutils.HoodieTestUtils.getDefaultStorageConf;
 
 public class TestHoodieMetadataBase extends HoodieJavaClientTestHarness {
   protected static HoodieTestTable testTable;
@@ -94,8 +97,8 @@ public class TestHoodieMetadataBase extends HoodieJavaClientTestHarness {
                    boolean enableMetrics, boolean validateMetadataPayloadStateConsistency) throws IOException {
     this.tableType = tableType;
     initPath();
-    initFileSystem(basePath, hadoopConf);
-    fs.mkdirs(new Path(basePath));
+    initFileSystem(basePath, storageConf);
+    storage.createDirectory(new StoragePath(basePath));
     initMetaClient(tableType);
     initTestDataGenerator();
     metadataTableBasePath = HoodieTableMetadata.getMetadataTableBasePath(basePath);
@@ -103,14 +106,15 @@ public class TestHoodieMetadataBase extends HoodieJavaClientTestHarness {
         ? writeConfig.get() : getWriteConfigBuilder(HoodieFailedWritesCleaningPolicy.EAGER, true,
         enableMetadataTable, enableMetrics, true,
         validateMetadataPayloadStateConsistency)
+        .withEngineType(EngineType.JAVA)
         .build();
     initWriteConfigAndMetatableWriter(this.writeConfig, enableMetadataTable);
   }
 
-  protected void initWriteConfigAndMetatableWriter(HoodieWriteConfig writeConfig, boolean enableMetadataTable) throws IOException {
+  protected void initWriteConfigAndMetatableWriter(HoodieWriteConfig writeConfig, boolean enableMetadataTable) {
     this.writeConfig = writeConfig;
     if (enableMetadataTable) {
-      metadataWriter = JavaHoodieBackedTableMetadataWriter.create(hadoopConf, writeConfig, context, Option.empty());
+      metadataWriter = JavaHoodieBackedTableMetadataWriter.create(storageConf, writeConfig, context, Option.empty());
       // reload because table configs could have been updated
       metaClient = HoodieTableMetaClient.reload(metaClient);
       testTable = HoodieMetadataTestTable.of(metaClient, metadataWriter, Option.of(context));
@@ -122,10 +126,10 @@ public class TestHoodieMetadataBase extends HoodieJavaClientTestHarness {
   @BeforeEach
   protected void initResources() {
     basePath = tempDir.resolve("java_client_tests" + System.currentTimeMillis()).toUri().getPath();
-    hadoopConf = new Configuration();
+    storageConf = getDefaultStorageConf();
     taskContextSupplier = new TestJavaTaskContextSupplier();
-    context = new HoodieJavaEngineContext(hadoopConf, taskContextSupplier);
-    initFileSystem(basePath, hadoopConf);
+    context = new HoodieJavaEngineContext(storageConf, taskContextSupplier);
+    initFileSystem(basePath, storageConf);
     initTestDataGenerator();
   }
 
@@ -249,7 +253,7 @@ public class TestHoodieMetadataBase extends HoodieJavaClientTestHarness {
 
   protected void archiveDataTable(HoodieWriteConfig writeConfig, HoodieTableMetaClient metaClient) throws IOException {
     HoodieTable table = HoodieJavaTable.create(writeConfig, context, metaClient);
-    HoodieTimelineArchiver archiver = new HoodieTimelineArchiver(writeConfig, table);
+    HoodieTimelineArchiver archiver = new TimelineArchiverV2(writeConfig, table);
     archiver.archiveIfRequired(context);
   }
 
@@ -302,8 +306,10 @@ public class TestHoodieMetadataBase extends HoodieJavaClientTestHarness {
         .withIndexConfig(HoodieIndexConfig.newBuilder().withIndexType(HoodieIndex.IndexType.BLOOM).build())
         .withMetadataConfig(HoodieMetadataConfig.newBuilder()
             .enable(useFileListingMetadata)
+            .withMetadataIndexColumnStats(false)
             .enableMetrics(enableMetrics)
             .ignoreSpuriousDeletes(validateMetadataPayloadConsistency)
+            .withMetadataIndexColumnStats(false) // HUDI-8774
             .build())
         .withMetricsConfig(HoodieMetricsConfig.newBuilder().on(enableMetrics)
             .withExecutorMetrics(enableMetrics).withReporterType(MetricsReporterType.INMEMORY.name()).build())
@@ -313,5 +319,9 @@ public class TestHoodieMetadataBase extends HoodieJavaClientTestHarness {
 
   protected HoodieWriteConfig getMetadataWriteConfig(HoodieWriteConfig writeConfig) {
     return HoodieMetadataWriteUtils.createMetadataWriteConfig(writeConfig, HoodieFailedWritesCleaningPolicy.LAZY);
+  }
+
+  protected HoodieTableMetaClient createMetaClientForMetadataTable() {
+    return HoodieTestUtils.createMetaClient(storageConf, metadataTableBasePath);
   }
 }

@@ -31,12 +31,14 @@ import org.apache.hudi.avro.model.HoodieRestorePlan;
 import org.apache.hudi.avro.model.HoodieRollbackMetadata;
 import org.apache.hudi.avro.model.HoodieRollbackPlan;
 import org.apache.hudi.avro.model.HoodieSavepointMetadata;
+import org.apache.hudi.client.HoodieColumnStatsIndexUtils;
 import org.apache.hudi.common.HoodiePendingRollbackInfo;
 import org.apache.hudi.common.config.HoodieMetadataConfig;
-import org.apache.hudi.common.config.SerializableConfiguration;
 import org.apache.hudi.common.engine.HoodieEngineContext;
 import org.apache.hudi.common.engine.HoodieLocalEngineContext;
 import org.apache.hudi.common.engine.TaskContextSupplier;
+import org.apache.hudi.common.fs.ConsistencyGuard;
+import org.apache.hudi.common.fs.ConsistencyGuard.FileVisibility;
 import org.apache.hudi.common.fs.ConsistencyGuardConfig;
 import org.apache.hudi.common.fs.FailSafeConsistencyGuard;
 import org.apache.hudi.common.fs.OptimisticConsistencyGuard;
@@ -46,10 +48,14 @@ import org.apache.hudi.common.model.HoodieKey;
 import org.apache.hudi.common.model.HoodieWriteStat;
 import org.apache.hudi.common.table.HoodieTableConfig;
 import org.apache.hudi.common.table.HoodieTableMetaClient;
+import org.apache.hudi.common.table.HoodieTableVersion;
 import org.apache.hudi.common.table.TableSchemaResolver;
 import org.apache.hudi.common.table.timeline.HoodieActiveTimeline;
 import org.apache.hudi.common.table.timeline.HoodieInstant;
 import org.apache.hudi.common.table.timeline.HoodieTimeline;
+import org.apache.hudi.common.table.timeline.InstantFileNameGenerator;
+import org.apache.hudi.common.table.timeline.InstantFileNameParser;
+import org.apache.hudi.common.table.timeline.InstantGenerator;
 import org.apache.hudi.common.table.view.FileSystemViewManager;
 import org.apache.hudi.common.table.view.HoodieTableFileSystemView;
 import org.apache.hudi.common.table.view.SyncableFileSystemView;
@@ -65,25 +71,27 @@ import org.apache.hudi.config.HoodieWriteConfig;
 import org.apache.hudi.exception.HoodieException;
 import org.apache.hudi.exception.HoodieIOException;
 import org.apache.hudi.exception.HoodieInsertException;
+import org.apache.hudi.exception.HoodieDuplicateDataFileDetectedException;
 import org.apache.hudi.exception.HoodieMetadataException;
 import org.apache.hudi.exception.HoodieUpsertException;
-import org.apache.hudi.hadoop.fs.ConsistencyGuard;
-import org.apache.hudi.hadoop.fs.ConsistencyGuard.FileVisibility;
+import org.apache.hudi.exception.SchemaCompatibilityException;
 import org.apache.hudi.index.HoodieIndex;
+import org.apache.hudi.io.HoodieMergeHandle;
 import org.apache.hudi.metadata.HoodieTableMetadata;
 import org.apache.hudi.metadata.HoodieTableMetadataWriter;
 import org.apache.hudi.metadata.MetadataPartitionType;
+import org.apache.hudi.storage.HoodieStorage;
+import org.apache.hudi.storage.StorageConfiguration;
+import org.apache.hudi.storage.StoragePath;
 import org.apache.hudi.table.action.HoodieWriteMetadata;
 import org.apache.hudi.table.action.bootstrap.HoodieBootstrapWriteMetadata;
+import org.apache.hudi.table.action.commit.HoodieMergeHelper;
 import org.apache.hudi.table.marker.WriteMarkers;
 import org.apache.hudi.table.marker.WriteMarkersFactory;
 import org.apache.hudi.table.storage.HoodieLayoutFactory;
 import org.apache.hudi.table.storage.HoodieStorageLayout;
 
 import org.apache.avro.Schema;
-import org.apache.hadoop.conf.Configuration;
-import org.apache.hadoop.fs.FileSystem;
-import org.apache.hadoop.fs.Path;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
@@ -121,16 +129,17 @@ import static org.apache.hudi.metadata.HoodieTableMetadataUtil.metadataPartition
  * @param <O> Type of outputs
  */
 public abstract class HoodieTable<T, I, K, O> implements Serializable {
-
   private static final Logger LOG = LoggerFactory.getLogger(HoodieTable.class);
 
   protected final HoodieWriteConfig config;
   protected final HoodieTableMetaClient metaClient;
-  protected final HoodieIndex<?, ?> index;
-  private SerializableConfiguration hadoopConfiguration;
+  private transient HoodieIndex<?, ?> index;
   protected final TaskContextSupplier taskContextSupplier;
-  private final HoodieTableMetadata metadata;
-  private final HoodieStorageLayout storageLayout;
+  private transient HoodieTableMetadata metadata;
+  private transient HoodieStorageLayout storageLayout;
+  private final InstantGenerator instantGenerator;
+  private final InstantFileNameGenerator instantFileNameGenerator;
+  private final InstantFileNameParser instantFileNameParser;
   private final boolean isMetadataTable;
 
   private transient FileSystemViewManager viewManager;
@@ -138,18 +147,13 @@ public abstract class HoodieTable<T, I, K, O> implements Serializable {
 
   protected HoodieTable(HoodieWriteConfig config, HoodieEngineContext context, HoodieTableMetaClient metaClient) {
     this.config = config;
-    this.hadoopConfiguration = context.getHadoopConf();
     this.context = context;
     this.isMetadataTable = HoodieTableMetadata.isMetadataTable(config.getBasePath());
-
-    HoodieMetadataConfig metadataConfig = HoodieMetadataConfig.newBuilder().fromProperties(config.getMetadataConfig().getProps())
-        .build();
-    this.metadata = HoodieTableMetadata.create(context, metadataConfig, config.getBasePath());
-
-    this.viewManager = FileSystemViewManager.createViewManager(context, config.getMetadataConfig(), config.getViewStorageConfig(), config.getCommonConfig(), unused -> metadata);
+    this.instantGenerator = metaClient.getInstantGenerator();
+    this.instantFileNameGenerator = metaClient.getInstantFileNameGenerator();
+    this.instantFileNameParser = metaClient.getInstantFileNameParser();
+    this.viewManager = getViewManager();
     this.metaClient = metaClient;
-    this.index = getIndex(config, context);
-    this.storageLayout = getStorageLayout(config);
     this.taskContextSupplier = context.getTaskContextSupplier();
   }
 
@@ -157,15 +161,15 @@ public abstract class HoodieTable<T, I, K, O> implements Serializable {
     return isMetadataTable;
   }
 
-  protected abstract HoodieIndex<?, ?> getIndex(HoodieWriteConfig config, HoodieEngineContext context);
-
-  protected HoodieStorageLayout getStorageLayout(HoodieWriteConfig config) {
-    return HoodieLayoutFactory.createLayout(config);
+  public HoodieTableVersion version() {
+    return metaClient.getTableConfig().getTableVersion();
   }
+
+  protected abstract HoodieIndex<?, ?> getIndex(HoodieWriteConfig config, HoodieEngineContext context);
 
   private synchronized FileSystemViewManager getViewManager() {
     if (null == viewManager) {
-      viewManager = FileSystemViewManager.createViewManager(getContext(), config.getMetadataConfig(), config.getViewStorageConfig(), config.getCommonConfig(), unused -> metadata);
+      viewManager = FileSystemViewManager.createViewManager(getContext(), config.getMetadataConfig(), config.getViewStorageConfig(), config.getCommonConfig(), unused -> getMetadataTable());
     }
     return viewManager;
   }
@@ -177,8 +181,7 @@ public abstract class HoodieTable<T, I, K, O> implements Serializable {
    * @param records  hoodieRecords to upsert
    * @return HoodieWriteMetadata
    */
-  public abstract HoodieWriteMetadata<O> upsert(HoodieEngineContext context, String instantTime,
-      I records);
+  public abstract HoodieWriteMetadata<O> upsert(HoodieEngineContext context, String instantTime, I records);
 
   /**
    * Insert a batch of new records into Hoodie table at the supplied instantTime.
@@ -187,8 +190,7 @@ public abstract class HoodieTable<T, I, K, O> implements Serializable {
    * @param records  hoodieRecords to upsert
    * @return HoodieWriteMetadata
    */
-  public abstract HoodieWriteMetadata<O> insert(HoodieEngineContext context, String instantTime,
-      I records);
+  public abstract HoodieWriteMetadata<O> insert(HoodieEngineContext context, String instantTime, I records);
 
   /**
    * Bulk Insert a batch of new records into Hoodie table at the supplied instantTime.
@@ -267,7 +269,7 @@ public abstract class HoodieTable<T, I, K, O> implements Serializable {
    * @return HoodieWriteMetadata
    */
   public abstract HoodieWriteMetadata<O> bulkInsertPrepped(HoodieEngineContext context, String instantTime,
-      I preppedRecords,  Option<BulkInsertPartitioner> bulkInsertPartitioner);
+      I preppedRecords, Option<BulkInsertPartitioner> bulkInsertPartitioner);
 
   /**
    * Replaces all the existing records and inserts the specified new records into Hoodie table at the supplied instantTime,
@@ -291,12 +293,32 @@ public abstract class HoodieTable<T, I, K, O> implements Serializable {
    */
   public abstract HoodieWriteMetadata<O> insertOverwriteTable(HoodieEngineContext context, String instantTime, I records);
 
+  /**
+   * Delete expired partition by config
+   * @param context HoodieEngineContext
+   * @param instantTime Instant Time for the action
+   * @return HoodieWriteMetadata
+   */
+  public abstract HoodieWriteMetadata<O> managePartitionTTL(HoodieEngineContext context, String instantTime);
+
   public HoodieWriteConfig getConfig() {
     return config;
   }
 
   public HoodieTableMetaClient getMetaClient() {
     return metaClient;
+  }
+
+  public InstantGenerator getInstantGenerator() {
+    return instantGenerator;
+  }
+
+  public InstantFileNameGenerator getInstantFileNameGenerator() {
+    return instantFileNameGenerator;
+  }
+
+  public InstantFileNameParser getInstantFileNameParser() {
+    return instantFileNameParser;
   }
 
   /**
@@ -306,15 +328,19 @@ public abstract class HoodieTable<T, I, K, O> implements Serializable {
     return getMetaClient().getTableConfig().isTablePartitioned();
   }
 
-  public Configuration getHadoopConf() {
-    return metaClient.getHadoopConf();
+  public StorageConfiguration<?> getStorageConf() {
+    return metaClient.getStorageConf();
+  }
+
+  public HoodieStorage getStorage() {
+    return metaClient.getStorage();
   }
 
   /**
    * Get the view of the file system for this table.
    */
   public TableFileSystemView getFileSystemView() {
-    return new HoodieTableFileSystemView(metaClient, getCompletedCommitsTimeline());
+    return HoodieTableFileSystemView.fileListingBasedFileSystemView(getContext(), metaClient, getCompletedCommitsTimeline());
   }
 
   /**
@@ -355,8 +381,8 @@ public abstract class HoodieTable<T, I, K, O> implements Serializable {
   /**
    * Get only the inflights (no-completed) commit timeline.
    */
-  public HoodieTimeline getPendingCommitTimeline() {
-    return metaClient.getCommitsTimeline().filterPendingExcludingMajorAndMinorCompaction();
+  public HoodieTimeline getPendingCommitsTimeline() {
+    return metaClient.getCommitsTimeline().filterInflightsAndRequested();
   }
 
   /**
@@ -398,7 +424,7 @@ public abstract class HoodieTable<T, I, K, O> implements Serializable {
    * Get the list of savepoint timestamps in this table.
    */
   public Set<String> getSavepointTimestamps() {
-    return getCompletedSavepointTimeline().getInstantsAsStream().map(HoodieInstant::getTimestamp).collect(Collectors.toSet());
+    return getCompletedSavepointTimeline().getInstantsAsStream().map(HoodieInstant::requestedTime).collect(Collectors.toSet());
   }
 
   public HoodieActiveTimeline getActiveTimeline() {
@@ -409,10 +435,16 @@ public abstract class HoodieTable<T, I, K, O> implements Serializable {
    * Return the index.
    */
   public HoodieIndex<?, ?> getIndex() {
+    if (index == null) {
+      index = getIndex(config, context);
+    }
     return index;
   }
 
   public HoodieStorageLayout getStorageLayout() {
+    if (storageLayout == null) {
+      storageLayout = HoodieLayoutFactory.createLayout(config);
+    }
     return storageLayout;
   }
 
@@ -564,7 +596,9 @@ public abstract class HoodieTable<T, I, K, O> implements Serializable {
    * @param partitionsToIndex List of {@link MetadataPartitionType} that should be indexed.
    * @return HoodieIndexPlan containing metadata partitions and instant upto which they should be indexed.
    */
-  public abstract Option<HoodieIndexPlan> scheduleIndexing(HoodieEngineContext context, String indexInstantTime, List<MetadataPartitionType> partitionsToIndex);
+  public abstract Option<HoodieIndexPlan> scheduleIndexing(HoodieEngineContext context, String indexInstantTime,
+                                                           List<MetadataPartitionType> partitionsToIndex,
+                                                           List<String> partitionPaths);
 
   /**
    * Execute requested index action.
@@ -638,11 +672,13 @@ public abstract class HoodieTable<T, I, K, O> implements Serializable {
    */
   public void rollbackInflightClustering(HoodieInstant inflightInstant,
                                          Function<String, Option<HoodiePendingRollbackInfo>> getPendingRollbackInstantFunc, boolean deleteInstants) {
-    ValidationUtils.checkArgument(inflightInstant.getAction().equals(HoodieTimeline.REPLACE_COMMIT_ACTION));
+    ValidationUtils.checkArgument(inflightInstant.getAction().equals(HoodieTimeline.CLUSTERING_ACTION)
+        || inflightInstant.getAction().equals(HoodieTimeline.REPLACE_COMMIT_ACTION),
+        String.format("Expected replace or clustering action instant but got %s", inflightInstant));
     rollbackInflightInstant(inflightInstant, getPendingRollbackInstantFunc);
     if (deleteInstants) {
       // above rollback would still keep requested in the timeline. so, lets delete it if if are looking to purge the pending clustering fully.
-      getActiveTimeline().deletePending(new HoodieInstant(HoodieInstant.State.REQUESTED, inflightInstant.getAction(), inflightInstant.getTimestamp()));
+      getActiveTimeline().deletePending(instantGenerator.createNewInstant(HoodieInstant.State.REQUESTED, inflightInstant.getAction(), inflightInstant.requestedTime()));
     }
   }
 
@@ -652,14 +688,19 @@ public abstract class HoodieTable<T, I, K, O> implements Serializable {
    * @param inflightInstant               Inflight instant
    * @param getPendingRollbackInstantFunc Function to get rollback instant
    */
-  private void rollbackInflightInstant(HoodieInstant inflightInstant,
-                                       Function<String, Option<HoodiePendingRollbackInfo>> getPendingRollbackInstantFunc) {
-    final String commitTime = getPendingRollbackInstantFunc.apply(inflightInstant.getTimestamp()).map(entry
-        -> entry.getRollbackInstant().getTimestamp())
-        .orElseGet(() -> getMetaClient().createNewInstantTime());
-    scheduleRollback(context, commitTime, inflightInstant, false, config.shouldRollbackUsingMarkers(),
-        false);
-    rollback(context, commitTime, inflightInstant, false, false);
+  void rollbackInflightInstant(HoodieInstant inflightInstant,
+                               Function<String, Option<HoodiePendingRollbackInfo>> getPendingRollbackInstantFunc) {
+    // Retrieve the rollback information using the provided function.
+    final Pair<String, Boolean> rollbackInfo = getPendingRollbackInstantFunc.apply(inflightInstant.requestedTime())
+        .map(entry -> Pair.of(entry.getRollbackInstant().requestedTime(), false))
+        .orElseGet(() -> Pair.of(getMetaClient().createNewInstantTime(), true));
+    // If a rollback has not scheduled (rollbackInfo.getRight() is true), schedule it.
+    if (rollbackInfo.getRight()) {
+      scheduleRollback(context, rollbackInfo.getLeft(), inflightInstant, false, config.shouldRollbackUsingMarkers(), false);
+    }
+    // Perform the rollback.
+    rollback(context, rollbackInfo.getLeft(), inflightInstant, false, false);
+    // Revert the inflight instant to requested state in the timeline.
     getActiveTimeline().revertInstantFromInflightToRequested(inflightInstant);
   }
 
@@ -670,8 +711,8 @@ public abstract class HoodieTable<T, I, K, O> implements Serializable {
    * @param inflightInstant Inflight Compaction Instant
    */
   public void rollbackInflightLogCompaction(HoodieInstant inflightInstant, Function<String, Option<HoodiePendingRollbackInfo>> getPendingRollbackInstantFunc) {
-    final String commitTime = getPendingRollbackInstantFunc.apply(inflightInstant.getTimestamp()).map(entry
-        -> entry.getRollbackInstant().getTimestamp())
+    final String commitTime = getPendingRollbackInstantFunc.apply(inflightInstant.requestedTime()).map(entry
+        -> entry.getRollbackInstant().requestedTime())
         .orElseGet(() -> getMetaClient().createNewInstantTime());
     scheduleRollback(context, commitTime, inflightInstant, false, config.shouldRollbackUsingMarkers(),
         false);
@@ -686,7 +727,7 @@ public abstract class HoodieTable<T, I, K, O> implements Serializable {
    * @throws HoodieIOException if some paths can't be finalized on storage
    */
   public void finalizeWrite(HoodieEngineContext context, String instantTs, List<HoodieWriteStat> stats) throws HoodieIOException {
-    reconcileAgainstMarkers(context, instantTs, stats, config.getConsistencyGuardConfig().isConsistencyCheckEnabled());
+    reconcileAgainstMarkers(context, instantTs, stats, config.getConsistencyGuardConfig().isConsistencyCheckEnabled(), config.shouldFailOnDuplicateDataFileDetection());
   }
 
   private void deleteInvalidFilesByPartitions(HoodieEngineContext context, Map<String, List<Pair<String, String>>> invalidFilesByPartition) {
@@ -696,11 +737,11 @@ public abstract class HoodieTable<T, I, K, O> implements Serializable {
             .flatMap(Collection::stream)
             .collect(Collectors.toList()),
         partitionFilePair -> {
-          final FileSystem fileSystem = metaClient.getFs();
+          final HoodieStorage storage = metaClient.getStorage();
           LOG.info("Deleting invalid data file=" + partitionFilePair);
           // Delete
           try {
-            fileSystem.delete(new Path(partitionFilePair.getValue()), false);
+            storage.deleteFile(new StoragePath(partitionFilePair.getValue()));
           } catch (IOException e) {
             throw new HoodieIOException(e.getMessage(), e);
           }
@@ -728,11 +769,12 @@ public abstract class HoodieTable<T, I, K, O> implements Serializable {
   protected void reconcileAgainstMarkers(HoodieEngineContext context,
                                          String instantTs,
                                          List<HoodieWriteStat> stats,
-                                         boolean consistencyCheckEnabled) throws HoodieIOException {
+                                         boolean consistencyCheckEnabled,
+                                         boolean shouldFailOnDuplicateDataFileDetection) throws HoodieIOException {
     try {
       // Reconcile marker and data files with WriteStats so that partially written data-files due to failed
       // (but succeeded on retry) tasks are removed.
-      String basePath = getMetaClient().getBasePath();
+      String basePath = getMetaClient().getBasePath().toString();
       WriteMarkers markers = WriteMarkersFactory.get(config.getMarkersType(), this, instantTs);
 
       if (!markers.doesMarkerDirExist()) {
@@ -755,10 +797,17 @@ public abstract class HoodieTable<T, I, K, O> implements Serializable {
       // Contains list of partially created files. These needs to be cleaned up.
       invalidDataPaths.removeAll(validDataPaths);
       invalidDataPaths.removeAll(validCdcDataPaths);
+
       if (!invalidDataPaths.isEmpty()) {
+        if (shouldFailOnDuplicateDataFileDetection) {
+          throw new HoodieDuplicateDataFileDetectedException("Duplicate data files detected " + invalidDataPaths);
+        }
+
         LOG.info("Removing duplicate files created due to task retries before committing. Paths=" + invalidDataPaths);
         Map<String, List<Pair<String, String>>> invalidPathsByPartition = invalidDataPaths.stream()
-            .map(dp -> Pair.of(new Path(basePath, dp).getParent().toString(), new Path(basePath, dp).toString()))
+            .map(dp ->
+                Pair.of(new StoragePath(basePath, dp).getParent().toString(),
+                    new StoragePath(basePath, dp).toString()))
             .collect(Collectors.groupingBy(Pair::getKey));
 
         // Ensure all files in delete list is actually present. This is mandatory for an eventually consistent FS.
@@ -803,10 +852,11 @@ public abstract class HoodieTable<T, I, K, O> implements Serializable {
   }
 
   private boolean waitForCondition(String partitionPath, Stream<Pair<String, String>> partitionFilePaths, FileVisibility visibility) {
-    final FileSystem fileSystem = metaClient.getRawFs();
+    final HoodieStorage storage = metaClient.getRawStorage();
     List<String> fileList = partitionFilePaths.map(Pair::getValue).collect(Collectors.toList());
     try {
-      getConsistencyGuard(fileSystem, config.getConsistencyGuardConfig()).waitTill(partitionPath, fileList, visibility);
+      getConsistencyGuard(storage, config.getConsistencyGuardConfig())
+          .waitTill(partitionPath, fileList, visibility);
     } catch (IOException | TimeoutException ioe) {
       LOG.error("Got exception while waiting for files to show up", ioe);
       return false;
@@ -819,10 +869,13 @@ public abstract class HoodieTable<T, I, K, O> implements Serializable {
    * <p>
    * Default consistencyGuard class is {@link OptimisticConsistencyGuard}.
    */
-  public static ConsistencyGuard getConsistencyGuard(FileSystem fs, ConsistencyGuardConfig consistencyGuardConfig) throws IOException {
+  public static ConsistencyGuard getConsistencyGuard(HoodieStorage storage,
+                                                     ConsistencyGuardConfig consistencyGuardConfig)
+      throws IOException {
     try {
       return consistencyGuardConfig.shouldEnableOptimisticConsistencyGuard()
-          ? new OptimisticConsistencyGuard(fs, consistencyGuardConfig) : new FailSafeConsistencyGuard(fs, consistencyGuardConfig);
+          ? new OptimisticConsistencyGuard(storage, consistencyGuardConfig)
+          : new FailSafeConsistencyGuard(storage, consistencyGuardConfig);
     } catch (Throwable e) {
       throw new IOException("Could not load ConsistencyGuard ", e);
     }
@@ -859,8 +912,10 @@ public abstract class HoodieTable<T, I, K, O> implements Serializable {
       Schema writerSchema = HoodieAvroUtils.createHoodieWriteSchema(config.getSchema());
       Schema tableSchema = HoodieAvroUtils.createHoodieWriteSchema(existingTableSchema.get());
       AvroSchemaUtils.checkSchemaCompatible(tableSchema, writerSchema, shouldValidate, allowProjection, getDropPartitionColNames());
+    } catch (SchemaCompatibilityException e) {
+      throw e;
     } catch (Exception e) {
-      throw new HoodieException("Failed to read schema/check compatibility for base path " + metaClient.getBasePath(), e);
+      throw new SchemaCompatibilityException("Failed to read schema/check compatibility for base path " + metaClient.getBasePath(), e);
     }
   }
 
@@ -911,7 +966,7 @@ public abstract class HoodieTable<T, I, K, O> implements Serializable {
   public HoodieEngineContext getContext() {
     // This is to handle scenarios where this is called at the executor tasks which do not have access
     // to engine context, and it ends up being null (as its not serializable and marked transient here).
-    return context == null ? new HoodieLocalEngineContext(hadoopConfiguration.get()) : context;
+    return context == null ? new HoodieLocalEngineContext(metaClient.getStorageConf()) : context;
   }
 
   /**
@@ -980,12 +1035,16 @@ public abstract class HoodieTable<T, I, K, O> implements Serializable {
    * Deletes the metadata partition if the writer disables any metadata index.
    */
   public void deleteMetadataIndexIfNecessary() {
-    Stream.of(MetadataPartitionType.values()).forEach(partitionType -> {
+    Stream.of(MetadataPartitionType.getValidValues()).forEach(partitionType -> {
       if (shouldDeleteMetadataPartition(partitionType)) {
         try {
           LOG.info("Deleting metadata partition because it is disabled in writer: " + partitionType.name());
-          if (metadataPartitionExists(metaClient.getBasePath(), context, partitionType)) {
-            deleteMetadataPartition(metaClient.getBasePath(), context, partitionType);
+          if (metadataPartitionExists(metaClient.getBasePath(), context, partitionType.getPartitionPath())) {
+            deleteMetadataPartition(metaClient.getBasePath(), context, partitionType.getPartitionPath());
+          }
+          if (partitionType == MetadataPartitionType.COLUMN_STATS) {
+            // delete index definition as well
+            HoodieColumnStatsIndexUtils.deleteColumnStatsIndexDefinition(getMetaClient());
           }
           clearMetadataTablePartitionsConfig(Option.of(partitionType), false);
         } catch (HoodieMetadataException e) {
@@ -998,12 +1057,17 @@ public abstract class HoodieTable<T, I, K, O> implements Serializable {
   private boolean shouldDeleteMetadataPartition(MetadataPartitionType partitionType) {
     // Only delete metadata table partition when all the following conditions are met:
     // (1) This is data table.
-    // (2) Index corresponding to this metadata partition is disabled in HoodieWriteConfig.
+    // (2) This metadata partition does NOT exist on storage.
     // (3) The completed metadata partitions in table config contains this partition.
     // NOTE: Inflight metadata partitions are not considered as they could have been inflight due to async indexer.
     if (isMetadataTable() || !config.isMetadataTableEnabled()) {
       return false;
     }
+    boolean metadataIndexDisabled = isMetadataIndexDisabled(partitionType);
+    return metadataIndexDisabled && metaClient.getTableConfig().getMetadataPartitions().contains(partitionType.getPartitionPath());
+  }
+
+  private boolean isMetadataIndexDisabled(MetadataPartitionType partitionType) {
     boolean metadataIndexDisabled;
     switch (partitionType) {
       // NOTE: FILES partition type is always considered in sync with hoodie.metadata.enable.
@@ -1017,12 +1081,21 @@ public abstract class HoodieTable<T, I, K, O> implements Serializable {
       case RECORD_INDEX:
         metadataIndexDisabled = !config.isRecordIndexEnabled();
         break;
+      // PARTITION_STATS should have same behavior as COLUMN_STATS
+      case PARTITION_STATS:
+        metadataIndexDisabled = !config.isPartitionStatsIndexEnabled();
+        break;
+      // Expression and Secondary index can be in different partitions for different keys,
+      // and do not delete unless DROP INDEX is called.
+      case EXPRESSION_INDEX:
+      case SECONDARY_INDEX:
+        metadataIndexDisabled = !partitionType.isMetadataPartitionAvailable(metaClient);
+        break;
       default:
         LOG.debug("Not a valid metadata partition type: " + partitionType.name());
         return false;
     }
-    return metadataIndexDisabled
-        && metaClient.getTableConfig().getMetadataPartitions().contains(partitionType.getPartitionPath());
+    return metadataIndexDisabled;
   }
 
   private boolean shouldExecuteMetadataTableDeletion() {
@@ -1043,15 +1116,21 @@ public abstract class HoodieTable<T, I, K, O> implements Serializable {
     if (clearAll && partitions.size() > 0) {
       LOG.info("Clear hoodie.table.metadata.partitions in hoodie.properties");
       metaClient.getTableConfig().setValue(TABLE_METADATA_PARTITIONS.key(), EMPTY_STRING);
-      HoodieTableConfig.update(metaClient.getFs(), new Path(metaClient.getMetaPath()), metaClient.getTableConfig().getProps());
+      HoodieTableConfig.update(metaClient.getStorage(), metaClient.getMetaPath(), metaClient.getTableConfig().getProps());
     } else if (partitionType.isPresent() && partitions.remove(partitionType.get().getPartitionPath())) {
       metaClient.getTableConfig().setValue(HoodieTableConfig.TABLE_METADATA_PARTITIONS.key(), String.join(",", partitions));
-      HoodieTableConfig.update(metaClient.getFs(), new Path(metaClient.getMetaPath()), metaClient.getTableConfig().getProps());
+      HoodieTableConfig.update(metaClient.getStorage(), metaClient.getMetaPath(), metaClient.getTableConfig().getProps());
     }
   }
 
   public HoodieTableMetadata getMetadataTable() {
-    return this.metadata;
+    if (metadata == null) {
+      HoodieMetadataConfig metadataConfig = HoodieMetadataConfig.newBuilder()
+          .fromProperties(config.getMetadataConfig().getProps())
+          .build();
+      metadata = HoodieTableMetadata.create(context, metaClient.getStorage(), metadataConfig, config.getBasePath());
+    }
+    return metadata;
   }
 
   /**
@@ -1082,5 +1161,13 @@ public abstract class HoodieTable<T, I, K, O> implements Serializable {
       return Collections.emptySet();
     }
     return new HashSet<>(Arrays.asList(partitionFields.get()));
+  }
+
+  public void runMerge(HoodieMergeHandle<?, ?, ?, ?> upsertHandle, String instantTime, String fileId) throws IOException {
+    if (upsertHandle.getOldFilePath() == null) {
+      throw new HoodieUpsertException("Error in finding the old file path at commit " + instantTime + " for fileId: " + fileId);
+    } else {
+      HoodieMergeHelper.newInstance().runMerge(this, upsertHandle);
+    }
   }
 }

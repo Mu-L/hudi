@@ -31,7 +31,7 @@ import java.util.concurrent.TimeUnit;
         + "the partition field. The field values are interpreted as timestamps and not just "
         + "converted to string while generating partition path value for records. Record key is "
         + "same as before where it is chosen by field name.")
-public class TimestampKeyGeneratorConfig {
+public class TimestampKeyGeneratorConfig extends HoodieConfig {
   private static final String TIMESTAMP_KEYGEN_CONFIG_PREFIX = "hoodie.keygen.timebased.";
   @Deprecated
   private static final String OLD_TIMESTAMP_KEYGEN_CONFIG_PREFIX = "hoodie.deltastreamer.keygen.timebased.";
@@ -42,7 +42,8 @@ public class TimestampKeyGeneratorConfig {
       .withAlternatives(OLD_TIMESTAMP_KEYGEN_CONFIG_PREFIX + "timestamp.type")
       .markAdvanced()
       .withDocumentation("Timestamp type of the field, which should be one of the timestamp types "
-          + "supported: `UNIX_TIMESTAMP`, `DATE_STRING`, `MIXED`, `EPOCHMILLISECONDS`, `SCALAR`.");
+          + "supported: `UNIX_TIMESTAMP`, `DATE_STRING`, `MIXED`, `EPOCHMILLISECONDS`,"
+          + " `EPOCHMICROSECONDS`, `SCALAR`.");
 
   public static final ConfigProperty<String> INPUT_TIME_UNIT = ConfigProperty
       .key(TIMESTAMP_KEYGEN_CONFIG_PREFIX + "timestamp.scalar.time.unit")

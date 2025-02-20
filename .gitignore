@@ -2,7 +2,9 @@
 /build/
 target/
 metastore_db/
+.metals/
 .mvn/
+.vscode/
 
 # OS Files #
 .DS_Store
@@ -65,6 +67,7 @@ local.properties
 .out
 .idea/*
 !.idea/vcs.xml
+!.idea/icon.png
 *.ipr
 *.iws
 *.iml

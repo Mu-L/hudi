@@ -22,9 +22,11 @@ import org.junit.jupiter.api.Test;
 
 import java.io.IOException;
 import java.lang.reflect.Method;
+import java.util.concurrent.atomic.AtomicInteger;
 
-import static org.junit.jupiter.api.Assertions.assertTrue;
+import static org.junit.jupiter.api.Assertions.assertDoesNotThrow;
 import static org.junit.jupiter.api.Assertions.assertFalse;
+import static org.junit.jupiter.api.Assertions.assertTrue;
 
 /**
  * Test retry helper.
@@ -48,5 +50,20 @@ public class TestRetryHelper {
     retryHelper =  new RetryHelper(INTERVAL_TIME, NUM, INTERVAL_TIME, Exception.class.getName());
     retry = (boolean) privateOne.invoke(retryHelper, new UnsupportedOperationException("test"));
     assertTrue(retry);
+  }
+
+  @Test
+  public void testCheckTooManyTimes() {
+    int maxRetries = 100;
+    RetryHelper retryHelper = new RetryHelper(INTERVAL_TIME, maxRetries, INTERVAL_TIME, null);
+    AtomicInteger counter = new AtomicInteger(0);
+    assertDoesNotThrow(() -> {
+      retryHelper.start(() -> {
+        if (counter.incrementAndGet() < maxRetries) {
+          throw new IOException("test");
+        }
+        return true;
+      });
+    });
   }
 }

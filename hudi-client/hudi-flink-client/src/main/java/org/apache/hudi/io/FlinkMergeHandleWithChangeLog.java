@@ -60,9 +60,9 @@ public class FlinkMergeHandleWithChangeLog<T, I, K, O>
         config,
         hoodieTable.getMetaClient().getTableConfig(),
         partitionPath,
-        getFileSystem(),
+        getStorage(),
         getWriterSchema(),
-        createLogWriter(instantTime, HoodieCDCUtils.CDC_LOGFILE_SUFFIX),
+        createLogWriter(instantTime, HoodieCDCUtils.CDC_LOGFILE_SUFFIX, Option.empty()),
         IOUtils.getMaxMemoryPerPartitionMerge(taskContextSupplier, config));
   }
 
@@ -81,7 +81,7 @@ public class FlinkMergeHandleWithChangeLog<T, I, K, O>
   }
 
   protected void writeInsertRecord(HoodieRecord<T> newRecord) throws IOException {
-    Schema schema = useWriterSchemaForCompaction ? writeSchemaWithMetaFields : writeSchema;
+    Schema schema = preserveMetadata ? writeSchemaWithMetaFields : writeSchema;
     // TODO Remove these unnecessary newInstance invocations
     HoodieRecord<T> savedRecord = newRecord.newInstance();
     super.writeInsertRecord(newRecord);

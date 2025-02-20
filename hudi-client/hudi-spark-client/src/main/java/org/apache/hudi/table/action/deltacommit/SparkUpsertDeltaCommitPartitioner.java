@@ -23,6 +23,7 @@ import org.apache.hudi.common.model.FileSlice;
 import org.apache.hudi.common.model.HoodieBaseFile;
 import org.apache.hudi.common.model.HoodieLogFile;
 import org.apache.hudi.common.model.HoodieRecordLocation;
+import org.apache.hudi.common.model.WriteOperationType;
 import org.apache.hudi.common.table.timeline.HoodieInstant;
 import org.apache.hudi.common.table.timeline.HoodieTimeline;
 import org.apache.hudi.config.HoodieWriteConfig;
@@ -46,8 +47,8 @@ import java.util.stream.Collectors;
 public class SparkUpsertDeltaCommitPartitioner<T> extends UpsertPartitioner<T> {
 
   public SparkUpsertDeltaCommitPartitioner(WorkloadProfile profile, HoodieSparkEngineContext context, HoodieTable table,
-                                           HoodieWriteConfig config) {
-    super(profile, context, table, config);
+                                           HoodieWriteConfig config, WriteOperationType operationType) {
+    super(profile, context, table, config, operationType);
   }
 
   @Override
@@ -91,7 +92,7 @@ public class SparkUpsertDeltaCommitPartitioner<T> extends UpsertPartitioner<T> {
     // pending compaction
     if (table.getIndex().canIndexLogFiles()) {
       return table.getSliceView()
-              .getLatestFileSlicesBeforeOrOn(partitionPath, latestCommitInstant.getTimestamp(), false)
+              .getLatestFileSlicesBeforeOrOn(partitionPath, latestCommitInstant.requestedTime(), false)
               .filter(this::isSmallFile)
               .collect(Collectors.toList());
     }
@@ -103,7 +104,7 @@ public class SparkUpsertDeltaCommitPartitioner<T> extends UpsertPartitioner<T> {
     // If we cannot index log files, then we choose the smallest parquet file in the partition and add inserts to
     // it. Doing this overtime for a partition, we ensure that we handle small file issues
     return table.getSliceView()
-          .getLatestFileSlicesBeforeOrOn(partitionPath, latestCommitInstant.getTimestamp(), false)
+          .getLatestFileSlicesBeforeOrOn(partitionPath, latestCommitInstant.requestedTime(), false)
           .filter(
               fileSlice ->
                   // NOTE: We can not pad slices with existing log-files w/o compacting these,

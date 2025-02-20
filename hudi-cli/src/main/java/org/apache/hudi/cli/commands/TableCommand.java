@@ -22,22 +22,25 @@ import org.apache.hudi.cli.HoodieCLI;
 import org.apache.hudi.cli.HoodiePrintHelper;
 import org.apache.hudi.cli.HoodieTableHeaderFields;
 import org.apache.hudi.cli.TableHeader;
+import org.apache.hudi.common.config.HoodieTimeGeneratorConfig;
 import org.apache.hudi.common.fs.ConsistencyGuardConfig;
 import org.apache.hudi.common.model.HoodieTableType;
 import org.apache.hudi.common.table.HoodieTableConfig;
 import org.apache.hudi.common.table.HoodieTableMetaClient;
+import org.apache.hudi.common.table.HoodieTableVersion;
 import org.apache.hudi.common.table.TableSchemaResolver;
 import org.apache.hudi.common.table.timeline.HoodieActiveTimeline;
 import org.apache.hudi.common.table.timeline.HoodieInstant;
 import org.apache.hudi.common.table.timeline.HoodieTimeline;
+import org.apache.hudi.common.table.timeline.TimeGeneratorType;
 import org.apache.hudi.common.util.Option;
 import org.apache.hudi.config.HoodieCompactionConfig;
 import org.apache.hudi.exception.HoodieException;
 import org.apache.hudi.exception.TableNotFoundException;
+import org.apache.hudi.storage.StoragePath;
 import org.apache.hudi.table.action.compact.strategy.UnBoundedCompactionStrategy;
 
 import org.apache.avro.Schema;
-import org.apache.hadoop.fs.Path;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 import org.springframework.shell.standard.ShellComponent;
@@ -59,7 +62,6 @@ import java.util.Set;
 import java.util.TreeSet;
 import java.util.stream.Collectors;
 
-import static org.apache.hudi.common.table.HoodieTableMetaClient.METAFOLDER_NAME;
 import static org.apache.hudi.common.util.StringUtils.getUTF8Bytes;
 
 /**
@@ -77,7 +79,6 @@ public class TableCommand {
   @ShellMethod(key = "connect", value = "Connect to a hoodie table")
   public String connect(
       @ShellOption(value = {"--path"}, help = "Base Path of the table") final String path,
-      @ShellOption(value = {"--layoutVersion"}, help = "Timeline Layout version", defaultValue = ShellOption.NULL) Integer layoutVersion,
       @ShellOption(value = {"--eventuallyConsistent"}, defaultValue = "false",
           help = "Enable eventual consistency") final boolean eventuallyConsistent,
       @ShellOption(value = {"--initialCheckIntervalMs"}, defaultValue = "2000",
@@ -85,18 +86,39 @@ public class TableCommand {
       @ShellOption(value = {"--maxWaitIntervalMs"}, defaultValue = "300000",
           help = "Max wait time for eventual consistency") final Integer maxConsistencyIntervalMs,
       @ShellOption(value = {"--maxCheckIntervalMs"}, defaultValue = "7",
-          help = "Max checks for eventual consistency") final Integer maxConsistencyChecks)
+          help = "Max checks for eventual consistency") final Integer maxConsistencyChecks,
+      @ShellOption(value = {"--timeGeneratorType"}, defaultValue = "WAIT_TO_ADJUST_SKEW",
+          help = "Time generator type, which is used to generate globally monotonically increasing timestamp") final String timeGeneratorType,
+      @ShellOption(value = {"--maxExpectedClockSkewMs"}, defaultValue = "200",
+          help = "The max expected clock skew time for WaitBasedTimeGenerator in ms") final Long maxExpectedClockSkewMs,
+      @ShellOption(value = {"--useDefaultLockProvider"}, defaultValue = "false",
+          help = "Use org.apache.hudi.client.transaction.lock.InProcessLockProvider") final boolean useDefaultLockProvider)
       throws IOException {
     HoodieCLI
         .setConsistencyGuardConfig(ConsistencyGuardConfig.newBuilder().withConsistencyCheckEnabled(eventuallyConsistent)
             .withInitialConsistencyCheckIntervalMs(initialConsistencyIntervalMs)
             .withMaxConsistencyCheckIntervalMs(maxConsistencyIntervalMs).withMaxConsistencyChecks(maxConsistencyChecks)
             .build());
+    HoodieCLI
+        .setTimeGeneratorConfig(HoodieTimeGeneratorConfig.newBuilder().withPath(path)
+            .withTimeGeneratorType(TimeGeneratorType.valueOf(timeGeneratorType))
+            .withMaxExpectedClockSkewMs(maxExpectedClockSkewMs)
+            .withDefaultLockProvider(useDefaultLockProvider)
+            .build());
     HoodieCLI.initConf();
-    HoodieCLI.connectTo(path, layoutVersion);
+    HoodieCLI.connectTo(path);
     HoodieCLI.initFS(true);
     HoodieCLI.state = HoodieCLI.CLIState.TABLE;
     return "Metadata for table " + HoodieCLI.getTableMetaClient().getTableConfig().getTableName() + " loaded";
+  }
+
+  public String createTable(
+      final String path,
+      final String name,
+      final String tableTypeStr,
+      String archiveFolder,
+      final String payloadClass) throws IOException {
+    return createTable(path, name, tableTypeStr, archiveFolder, HoodieTableVersion.current().versionCode(), payloadClass);
   }
 
   /**
@@ -115,8 +137,8 @@ public class TableCommand {
           help = "Hoodie Table Type. Must be one of : COPY_ON_WRITE or MERGE_ON_READ") final String tableTypeStr,
       @ShellOption(value = {"--archiveLogFolder"}, help = "Folder Name for storing archived timeline",
           defaultValue = ShellOption.NULL) String archiveFolder,
-      @ShellOption(value = {"--layoutVersion"}, help = "Specific Layout Version to use",
-          defaultValue = ShellOption.NULL) Integer layoutVersion,
+      @ShellOption(value = {"--tableVersion"}, help = "Specific table Version to create table as",
+          defaultValue = ShellOption.NULL) Integer tableVersion,
       @ShellOption(value = {"--payloadClass"}, defaultValue = "org.apache.hudi.common.model.HoodieAvroPayload",
           help = "Payload Class") final String payloadClass) throws IOException {
 
@@ -125,7 +147,7 @@ public class TableCommand {
 
     boolean existing = false;
     try {
-      HoodieTableMetaClient.builder().setConf(HoodieCLI.conf).setBasePath(path).build();
+      HoodieTableMetaClient.builder().setConf(HoodieCLI.conf.newInstance()).setBasePath(path).build();
       existing = true;
     } catch (TableNotFoundException dfe) {
       // expected
@@ -136,15 +158,16 @@ public class TableCommand {
       throw new IllegalStateException("Table already existing in path : " + path);
     }
 
-    HoodieTableMetaClient.withPropertyBuilder()
+    HoodieTableMetaClient.newTableBuilder()
         .setTableType(tableTypeStr)
         .setTableName(name)
         .setArchiveLogFolder(archiveFolder)
         .setPayloadClassName(payloadClass)
-        .setTimelineLayoutVersion(layoutVersion)
-        .initTable(HoodieCLI.conf, path);
+        .setTableVersion(tableVersion == null ? HoodieTableVersion.current().versionCode() : tableVersion)
+        .initTable(HoodieCLI.conf.newInstance(), path);
     // Now connect to ensure loading works
-    return connect(path, layoutVersion, false, 0, 0, 0);
+    return connect(path, false, 0, 0, 0,
+        "WAIT_TO_ADJUST_SKEW", 200L, true);
   }
 
   /**
@@ -157,7 +180,7 @@ public class TableCommand {
     List<Comparable[]> rows = new ArrayList<>();
     rows.add(new Comparable[] {"basePath", client.getBasePath()});
     rows.add(new Comparable[] {"metaPath", client.getMetaPath()});
-    rows.add(new Comparable[] {"fileSystem", client.getFs().getScheme()});
+    rows.add(new Comparable[] {"fileSystem", client.getStorage().getScheme()});
     client.getTableConfig().propsMap().entrySet().forEach(e -> {
       rows.add(new Comparable[] {e.getKey(), e.getValue()});
     });
@@ -197,8 +220,7 @@ public class TableCommand {
   public String recoverTableConfig() throws IOException {
     HoodieCLI.refreshTableMetadata();
     HoodieTableMetaClient client = HoodieCLI.getTableMetaClient();
-    Path metaPathDir = new Path(client.getBasePath(), METAFOLDER_NAME);
-    HoodieTableConfig.recover(client.getFs(), metaPathDir);
+    HoodieTableConfig.recover(client.getStorage(), client.getMetaPath());
     return descTable();
   }
 
@@ -213,8 +235,7 @@ public class TableCommand {
     try (FileInputStream fileInputStream = new FileInputStream(updatePropsFilePath)) {
       updatedProps.load(fileInputStream);
     }
-    Path metaPathDir = new Path(client.getBasePath(), METAFOLDER_NAME);
-    HoodieTableConfig.update(client.getFs(), metaPathDir, updatedProps);
+    HoodieTableConfig.update(client.getStorage(), client.getMetaPath(), updatedProps);
 
     HoodieCLI.refreshTableMetadata();
     Map<String, String> newProps = HoodieCLI.getTableMetaClient().getTableConfig().propsMap();
@@ -229,8 +250,7 @@ public class TableCommand {
     Map<String, String> oldProps = client.getTableConfig().propsMap();
 
     Set<String> deleteConfigs = Arrays.stream(csConfigs.split(",")).collect(Collectors.toSet());
-    Path metaPathDir = new Path(client.getBasePath(), METAFOLDER_NAME);
-    HoodieTableConfig.delete(client.getFs(), metaPathDir, deleteConfigs);
+    HoodieTableConfig.delete(client.getStorage(), client.getMetaPath(), deleteConfigs);
 
     HoodieCLI.refreshTableMetadata();
     Map<String, String> newProps = HoodieCLI.getTableMetaClient().getTableConfig().propsMap();
@@ -259,7 +279,7 @@ public class TableCommand {
       throws Exception {
     HoodieTableMetaClient client = HoodieCLI.getTableMetaClient();
     String tableName = client.getTableConfig().getTableName();
-    String tablePath = client.getBasePathV2().toString();
+    StoragePath tablePath = client.getBasePath();
     Map<String, String> oldProps = client.getTableConfig().propsMap();
 
     HoodieTableType currentType = client.getTableType();
@@ -301,7 +321,7 @@ public class TableCommand {
         for (int i = 0; i < pendingCompactionInstants.size(); i++) {
           HoodieInstant compactionInstant = pendingCompactionInstants.get(i);
           LOG.info("compact {} instant {}", i + 1, compactionInstant);
-          String result = new CompactionCommand().compact(parallelism, "", master, sparkMemory, retry, compactionInstant.getTimestamp(), propsFilePath, configs);
+          String result = new CompactionCommand().compact(parallelism, "", master, sparkMemory, retry, compactionInstant.requestedTime(), propsFilePath, configs);
           LOG.info("compact instant {} result: {}", compactionInstant, result);
           if (!result.startsWith(CompactionCommand.COMPACTION_EXE_SUCCESSFUL)) {
             throw new HoodieException(String.format("Compact %s failed", compactionInstant));
@@ -343,15 +363,15 @@ public class TableCommand {
         }
         break;
       default:
-        throw new HoodieException("Unsupported change type " + changeType + ". Only support MOR or COW.");
+        throw new HoodieException(
+            "Unsupported change type " + changeType + ". Only support MOR or COW.");
     }
 
     Properties updatedProps = new Properties();
     updatedProps.putAll(oldProps);
     // change the table type to target type
     updatedProps.put(HoodieTableConfig.TYPE.key(), targetType);
-    Path metaPathDir = new Path(client.getBasePath(), METAFOLDER_NAME);
-    HoodieTableConfig.update(client.getFs(), metaPathDir, updatedProps);
+    HoodieTableConfig.update(client.getStorage(), client.getMetaPath(), updatedProps);
 
     HoodieCLI.refreshTableMetadata();
     Map<String, String> newProps = HoodieCLI.getTableMetaClient().getTableConfig().propsMap();
@@ -388,12 +408,8 @@ public class TableCommand {
     if (outFile.exists()) {
       outFile.delete();
     }
-    OutputStream os = null;
-    try {
-      os = new FileOutputStream(outFile);
+    try (OutputStream os = new FileOutputStream(outFile)) {
       os.write(getUTF8Bytes(data), 0, data.length());
-    } finally {
-      os.close();
     }
   }
 }

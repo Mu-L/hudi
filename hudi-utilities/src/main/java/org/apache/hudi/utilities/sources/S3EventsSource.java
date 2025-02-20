@@ -19,6 +19,7 @@
 package org.apache.hudi.utilities.sources;
 
 import org.apache.hudi.common.config.TypedProperties;
+import org.apache.hudi.common.table.checkpoint.Checkpoint;
 import org.apache.hudi.common.util.Option;
 import org.apache.hudi.common.util.collection.Pair;
 import org.apache.hudi.utilities.UtilHelpers;
@@ -26,14 +27,14 @@ import org.apache.hudi.utilities.config.S3SourceConfig;
 import org.apache.hudi.utilities.schema.SchemaProvider;
 import org.apache.hudi.utilities.sources.helpers.S3EventsMetaSelector;
 
-import software.amazon.awssdk.services.sqs.SqsClient;
-import software.amazon.awssdk.services.sqs.model.Message;
 import org.apache.spark.api.java.JavaSparkContext;
 import org.apache.spark.sql.Dataset;
 import org.apache.spark.sql.Encoders;
 import org.apache.spark.sql.Row;
 import org.apache.spark.sql.SparkSession;
 import org.apache.spark.sql.types.StructType;
+import software.amazon.awssdk.services.sqs.SqsClient;
+import software.amazon.awssdk.services.sqs.model.Message;
 
 import java.io.Closeable;
 import java.io.IOException;
@@ -73,8 +74,8 @@ public class S3EventsSource extends RowSource implements Closeable {
    * @return A pair of dataset of event records and the next checkpoint instant string
    */
   @Override
-  public Pair<Option<Dataset<Row>>, String> fetchNextBatch(Option<String> lastCkptStr, long sourceLimit) {
-    Pair<List<String>, String> selectPathsWithLatestSqsMessage =
+  public Pair<Option<Dataset<Row>>, Checkpoint> fetchNextBatch(Option<Checkpoint> lastCkptStr, long sourceLimit) {
+    Pair<List<String>, Checkpoint> selectPathsWithLatestSqsMessage =
         pathSelector.getNextEventsFromQueue(sqs, lastCkptStr, processedMessages);
     if (selectPathsWithLatestSqsMessage.getLeft().isEmpty()) {
       return Pair.of(Option.empty(), selectPathsWithLatestSqsMessage.getRight());

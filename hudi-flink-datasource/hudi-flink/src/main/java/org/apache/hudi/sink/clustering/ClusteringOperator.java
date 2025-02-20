@@ -20,11 +20,13 @@ package org.apache.hudi.sink.clustering;
 
 import org.apache.hudi.adapter.MaskingOutputAdapter;
 import org.apache.hudi.adapter.Utils;
+import org.apache.hudi.avro.AvroSchemaUtils;
 import org.apache.hudi.client.FlinkTaskContextSupplier;
 import org.apache.hudi.client.HoodieFlinkWriteClient;
 import org.apache.hudi.client.WriteStatus;
 import org.apache.hudi.client.utils.ConcatenatingIterator;
 import org.apache.hudi.common.config.HoodieStorageConfig;
+import org.apache.hudi.common.config.TypedProperties;
 import org.apache.hudi.common.model.ClusteringOperation;
 import org.apache.hudi.common.model.HoodieRecord;
 import org.apache.hudi.common.table.HoodieTableConfig;
@@ -44,10 +46,14 @@ import org.apache.hudi.io.IOUtils;
 import org.apache.hudi.io.storage.HoodieAvroFileReader;
 import org.apache.hudi.io.storage.HoodieFileReader;
 import org.apache.hudi.io.storage.HoodieFileReaderFactory;
+import org.apache.hudi.io.storage.HoodieIOFactory;
+import org.apache.hudi.keygen.BaseKeyGenerator;
+import org.apache.hudi.keygen.factory.HoodieAvroKeyGeneratorFactory;
 import org.apache.hudi.metrics.FlinkClusteringMetrics;
 import org.apache.hudi.sink.bulk.BulkInsertWriterHelper;
 import org.apache.hudi.sink.bulk.sort.SortOperatorGen;
 import org.apache.hudi.sink.utils.NonThrownExecutor;
+import org.apache.hudi.storage.StoragePath;
 import org.apache.hudi.table.HoodieFlinkTable;
 import org.apache.hudi.util.AvroSchemaConverter;
 import org.apache.hudi.util.AvroToRowDataConverters;
@@ -79,7 +85,6 @@ import org.apache.flink.table.runtime.typeutils.BinaryRowDataSerializer;
 import org.apache.flink.table.runtime.typeutils.RowDataSerializer;
 import org.apache.flink.table.runtime.util.StreamRecordCollector;
 import org.apache.flink.table.types.logical.RowType;
-import org.apache.hadoop.fs.Path;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
@@ -163,7 +168,10 @@ public class ClusteringOperator extends TableStreamOperator<ClusteringCommitEven
     this.table = writeClient.getHoodieTable();
 
     this.schema = AvroSchemaConverter.convertToSchema(rowType);
-    this.readerSchema = this.schema;
+    // Since there exists discrepancies between flink and spark dealing with nullability of primary key field,
+    // and there may be some files written by spark, force update schema as nullable to make sure clustering
+    // scan successfully without schema validating exception.
+    this.readerSchema = AvroSchemaUtils.asNullable(schema);
     this.requiredPos = getRequiredPositions();
 
     this.avroToRowDataConverter = AvroToRowDataConverters.createRowConverter(rowType);
@@ -273,16 +281,16 @@ public class ClusteringOperator extends TableStreamOperator<ClusteringCommitEven
       try {
         Option<HoodieFileReader> baseFileReader = StringUtils.isNullOrEmpty(clusteringOp.getDataFilePath())
             ? Option.empty()
-            : Option.of(HoodieFileReaderFactory.getReaderFactory(table.getConfig().getRecordMerger().getRecordType())
-            .getFileReader(table.getConfig(), table.getHadoopConf(), new Path(clusteringOp.getDataFilePath())));
+            : Option.of(HoodieIOFactory.getIOFactory(table.getStorage())
+            .getReaderFactory(table.getConfig().getRecordMerger().getRecordType())
+            .getFileReader(table.getConfig(), new StoragePath(clusteringOp.getDataFilePath())));
         HoodieMergedLogRecordScanner scanner = HoodieMergedLogRecordScanner.newBuilder()
-            .withFileSystem(table.getMetaClient().getFs())
+            .withStorage(table.getStorage())
             .withBasePath(table.getMetaClient().getBasePath())
             .withLogFilePaths(clusteringOp.getDeltaFilePaths())
             .withReaderSchema(readerSchema)
             .withLatestInstantTime(instantTime)
             .withMaxMemorySizeInBytes(maxMemoryPerCompaction)
-            .withReadBlocksLazily(writeConfig.getCompactionLazyBlockReadEnabled())
             .withReverseReader(writeConfig.getCompactionReverseLogReadEnabled())
             .withBufferSize(writeConfig.getMaxDFSStreamBufferSize())
             .withSpillableMapBasePath(writeConfig.getSpillableMapBasePath())
@@ -290,13 +298,14 @@ public class ClusteringOperator extends TableStreamOperator<ClusteringCommitEven
             .withBitCaskDiskMapCompressionEnabled(writeConfig.getCommonConfig().isBitCaskDiskMapCompressionEnabled())
             .withRecordMerger(writeConfig.getRecordMerger())
             .build();
-
         HoodieTableConfig tableConfig = table.getMetaClient().getTableConfig();
+        Option<BaseKeyGenerator> keyGeneratorOpt = tableConfig.populateMetaFields() ? Option.empty() :
+            Option.of((BaseKeyGenerator) HoodieAvroKeyGeneratorFactory.createKeyGenerator(new TypedProperties(writeConfig.getProps())));
         HoodieFileSliceReader<? extends IndexedRecord> hoodieFileSliceReader = new HoodieFileSliceReader(baseFileReader, scanner, readerSchema,
             tableConfig.getPreCombineField(),writeConfig.getRecordMerger(),
             tableConfig.getProps(),
             tableConfig.populateMetaFields() ? Option.empty() : Option.of(Pair.of(tableConfig.getRecordKeyFieldProp(),
-                tableConfig.getPartitionFieldProp())));
+                tableConfig.getPartitionFieldProp())), keyGeneratorOpt);
 
         recordIterators.add(StreamSupport.stream(Spliterators.spliteratorUnknownSize(hoodieFileSliceReader, Spliterator.NONNULL), false).map(hoodieRecord -> {
           try {
@@ -321,9 +330,10 @@ public class ClusteringOperator extends TableStreamOperator<ClusteringCommitEven
     List<Iterator<RowData>> iteratorsForPartition = clusteringOps.stream().map(clusteringOp -> {
       Iterable<IndexedRecord> indexedRecords = () -> {
         try {
-          HoodieFileReaderFactory fileReaderFactory = HoodieFileReaderFactory.getReaderFactory(table.getConfig().getRecordMerger().getRecordType());
-          HoodieAvroFileReader fileReader = (HoodieAvroFileReader) fileReaderFactory
-              .getFileReader(table.getConfig(), table.getHadoopConf(), new Path(clusteringOp.getDataFilePath()));
+          HoodieFileReaderFactory fileReaderFactory = HoodieIOFactory.getIOFactory(table.getStorage())
+              .getReaderFactory(table.getConfig().getRecordMerger().getRecordType());
+          HoodieAvroFileReader fileReader = (HoodieAvroFileReader) fileReaderFactory.getFileReader(
+              table.getConfig(), new StoragePath(clusteringOp.getDataFilePath()));
 
           return new CloseableMappingIterator<>(fileReader.getRecordIterator(readerSchema), HoodieRecord::getData);
         } catch (IOException e) {

@@ -24,6 +24,7 @@ import org.apache.hudi.PublicAPIClass;
 import org.apache.hudi.PublicAPIMethod;
 
 import java.io.Serializable;
+import java.util.Arrays;
 
 /**
  * Represents the information of a storage path representing a directory or a file.
@@ -31,20 +32,39 @@ import java.io.Serializable;
  * with simplification based on what Hudi needs.
  */
 @PublicAPIClass(maturity = ApiMaturityLevel.EVOLVING)
-public class StoragePathInfo implements Serializable {
+public class StoragePathInfo implements Serializable, Comparable<StoragePathInfo> {
   private final StoragePath path;
   private final long length;
   private final boolean isDirectory;
+  private final short blockReplication;
+  private final long blockSize;
   private final long modificationTime;
+  private final String[] locations;
 
   public StoragePathInfo(StoragePath path,
                          long length,
                          boolean isDirectory,
+                         short blockReplication,
+                         long blockSize,
                          long modificationTime) {
+    this(path, length, isDirectory, blockReplication,
+        blockSize, modificationTime, null);
+  }
+
+  public StoragePathInfo(StoragePath path,
+                         long length,
+                         boolean isDirectory,
+                         short blockReplication,
+                         long blockSize,
+                         long modificationTime,
+                         String[] locations) {
     this.path = path;
     this.length = length;
     this.isDirectory = isDirectory;
+    this.blockReplication = blockReplication;
+    this.blockSize = blockSize;
     this.modificationTime = modificationTime;
+    this.locations = locations;
   }
 
   /**
@@ -80,11 +100,40 @@ public class StoragePathInfo implements Serializable {
   }
 
   /**
+   * @return the block replication if applied.
+   */
+  @PublicAPIMethod(maturity = ApiMaturityLevel.EVOLVING)
+  public short getBlockReplication() {
+    return blockReplication;
+  }
+
+  /**
+   * @return the block size in bytes if applied.
+   */
+  @PublicAPIMethod(maturity = ApiMaturityLevel.EVOLVING)
+  public long getBlockSize() {
+    return blockSize;
+  }
+
+  /**
    * @return the modification of a file.
    */
   @PublicAPIMethod(maturity = ApiMaturityLevel.EVOLVING)
   public long getModificationTime() {
     return modificationTime;
+  }
+
+  /**
+   * @return the locations of the file in the file system, possibly null.
+   */
+  @PublicAPIMethod(maturity = ApiMaturityLevel.EVOLVING)
+  public String[] getLocations() {
+    return locations;
+  }
+
+  @Override
+  public int compareTo(StoragePathInfo o) {
+    return this.getPath().compareTo(o.getPath());
   }
 
   @Override
@@ -114,7 +163,10 @@ public class StoragePathInfo implements Serializable {
         + "path=" + path
         + ", length=" + length
         + ", isDirectory=" + isDirectory
+        + ", blockReplication=" + blockReplication
+        + ", blockSize=" + blockSize
         + ", modificationTime=" + modificationTime
+        + ", locations=" + Arrays.toString(locations)
         + '}';
   }
 }

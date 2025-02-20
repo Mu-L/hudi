@@ -18,7 +18,6 @@
 
 package org.apache.hudi.cli;
 
-import org.apache.hudi.DataSourceWriteOptions;
 import org.apache.hudi.client.SparkRDDWriteClient;
 import org.apache.hudi.client.common.HoodieSparkEngineContext;
 import org.apache.hudi.common.config.HoodieConfig;
@@ -33,8 +32,10 @@ import org.apache.hudi.common.util.ValidationUtils;
 import org.apache.hudi.common.util.collection.Pair;
 import org.apache.hudi.config.HoodieCompactionConfig;
 import org.apache.hudi.config.HoodieIndexConfig;
+import org.apache.hudi.config.HoodiePayloadConfig;
 import org.apache.hudi.config.HoodieWriteConfig;
 import org.apache.hudi.exception.HoodieException;
+import org.apache.hudi.hadoop.fs.HadoopFSUtils;
 import org.apache.hudi.hive.HiveSyncConfig;
 import org.apache.hudi.hive.HiveSyncTool;
 import org.apache.hudi.index.HoodieIndex;
@@ -59,7 +60,7 @@ import java.util.Collections;
 import java.util.HashMap;
 import java.util.Map;
 
-import static org.apache.hudi.common.table.HoodieTableConfig.ARCHIVELOG_FOLDER;
+import static org.apache.hudi.common.table.HoodieTableConfig.TIMELINE_HISTORY_PATH;
 import static org.apache.hudi.common.table.HoodieTableConfig.PARTITION_METAFILE_USE_BASE_FORMAT;
 import static org.apache.hudi.common.table.HoodieTableConfig.POPULATE_META_FIELDS;
 import static org.apache.hudi.common.table.HoodieTableConfig.TIMELINE_TIMEZONE;
@@ -140,15 +141,11 @@ public class BootstrapExecutorUtils implements Serializable {
             .key()),
         HoodieTableConfig.BOOTSTRAP_BASE_PATH.key() + " must be specified.");
     this.bootstrapBasePath = properties.getString(HoodieTableConfig.BOOTSTRAP_BASE_PATH.key());
-
-    // Add more defaults if full bootstrap requested
-    this.props.putIfAbsent(DataSourceWriteOptions.PAYLOAD_CLASS_NAME().key(),
-        DataSourceWriteOptions.PAYLOAD_CLASS_NAME().defaultValue());
     /*
      * Schema provider that supplies the command for reading the input and writing out the target table.
      */
     SchemaProvider schemaProvider = createSchemaProvider(cfg.schemaProviderClass, props, jssc);
-    String keyGenClass = genKeyGenClassAndPartitionColumns().getLeft();
+    String keyGenClass = genKeyGenClassAndPartitionColumnsForKeyGenerator().getLeft();
     HoodieWriteConfig.Builder builder =
         HoodieWriteConfig.newBuilder().withPath(cfg.basePath)
             .withCompactionConfig(HoodieCompactionConfig.newBuilder().withInlineCompaction(false).build())
@@ -156,6 +153,7 @@ public class BootstrapExecutorUtils implements Serializable {
             .withIndexConfig(HoodieIndexConfig.newBuilder().withIndexType(HoodieIndex.IndexType.BLOOM).build())
             .withAutoCommit(true)
             .withKeyGenerator(keyGenClass)
+            .withPayloadConfig(HoodiePayloadConfig.newBuilder().withPayloadClass(cfg.payloadClass).build())
             .withProps(props);
 
     if (null != schemaProvider && null != schemaProvider.getTargetSchema()) {
@@ -229,21 +227,22 @@ public class BootstrapExecutorUtils implements Serializable {
             + ". Cannot bootstrap data on top of an existing table");
       }
     }
-    Pair<String, String> keyGenClassAndParCols = genKeyGenClassAndPartitionColumns();
+    Pair<String, String> keyGenClassAndParColsForKeyGenerator = genKeyGenClassAndPartitionColumnsForKeyGenerator();
     Map<String, Object> timestampKeyGeneratorConfigs =
-        extractConfigsRelatedToTimestampBasedKeyGenerator(keyGenClassAndParCols.getLeft(), props);
+        extractConfigsRelatedToTimestampBasedKeyGenerator(keyGenClassAndParColsForKeyGenerator.getLeft(), props);
 
-    HoodieTableMetaClient.PropertyBuilder builder = HoodieTableMetaClient.withPropertyBuilder()
+    HoodieTableMetaClient.TableBuilder builder = HoodieTableMetaClient.newTableBuilder()
         .fromProperties(props)
         .setTableType(cfg.tableType)
         .setDatabaseName(cfg.database)
         .setTableName(cfg.tableName)
+        .setTableVersion(bootstrapConfig.getWriteVersion())
         .setRecordKeyFields(props.getString(RECORDKEY_FIELD_NAME.key()))
         .setPreCombineField(props.getString(PRECOMBINE_FIELD_NAME.key(), null))
         .setPopulateMetaFields(props.getBoolean(
             POPULATE_META_FIELDS.key(), POPULATE_META_FIELDS.defaultValue()))
         .setArchiveLogFolder(props.getString(
-            ARCHIVELOG_FOLDER.key(), ARCHIVELOG_FOLDER.defaultValue()))
+            TIMELINE_HISTORY_PATH.key(), TIMELINE_HISTORY_PATH.defaultValue()))
         .setPayloadClassName(cfg.payloadClass)
         .setBaseFileFormat(cfg.baseFileFormat)
         .setBootstrapIndexClass(cfg.bootstrapIndexClass)
@@ -266,13 +265,13 @@ public class BootstrapExecutorUtils implements Serializable {
             PARTITION_METAFILE_USE_BASE_FORMAT.key(),
             PARTITION_METAFILE_USE_BASE_FORMAT.defaultValue()))
         .set(timestampKeyGeneratorConfigs)
-        .setKeyGeneratorClassProp(keyGenClassAndParCols.getLeft())
-        .setPartitionFields(keyGenClassAndParCols.getRight());
+        .setKeyGeneratorClassProp(keyGenClassAndParColsForKeyGenerator.getLeft())
+        .setPartitionFields(keyGenClassAndParColsForKeyGenerator.getRight());
 
-    builder.initTable(new Configuration(jssc.hadoopConfiguration()), cfg.basePath);
+    builder.initTable(HadoopFSUtils.getStorageConfWithCopy(jssc.hadoopConfiguration()), cfg.basePath);
   }
 
-  private Pair<String, String> genKeyGenClassAndPartitionColumns() {
+  private Pair<String, String> genKeyGenClassAndPartitionColumnsForKeyGenerator() {
     String keyGenClass;
     if (StringUtils.nonEmpty(props.getString(HoodieWriteConfig.KEYGENERATOR_CLASS_NAME.key(), null))) {
       keyGenClass = props.getString(HoodieWriteConfig.KEYGENERATOR_CLASS_NAME.key());
@@ -282,15 +281,15 @@ public class BootstrapExecutorUtils implements Serializable {
       keyGenClass = KeyGeneratorType.getKeyGeneratorClassName(new HoodieConfig(props));
     }
     props.put(HoodieWriteConfig.KEYGENERATOR_CLASS_NAME.key(), keyGenClass);
-    String partitionColumns = SparkKeyGenUtils.getPartitionColumns(props);
+    String partitionColumnsForKeyGenerator = SparkKeyGenUtils.getPartitionColumnsForKeyGenerator(props);
 
-    if (StringUtils.isNullOrEmpty(partitionColumns)) {
-      partitionColumns = null;
+    if (StringUtils.isNullOrEmpty(partitionColumnsForKeyGenerator)) {
+      partitionColumnsForKeyGenerator = null;
       if (keyGenClass.equals(SimpleKeyGenerator.class.getName())) {
         keyGenClass = NonpartitionedKeyGenerator.class.getName();
       }
     }
-    return Pair.of(keyGenClass, partitionColumns);
+    return Pair.of(keyGenClass, partitionColumnsForKeyGenerator);
   }
 
   private Map<String, Object> extractConfigsRelatedToTimestampBasedKeyGenerator(String keyGenerator, TypedProperties params) {

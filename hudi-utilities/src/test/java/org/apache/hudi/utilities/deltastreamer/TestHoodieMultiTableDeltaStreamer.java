@@ -34,7 +34,6 @@ import org.apache.hudi.utilities.sources.TestDataSource;
 import org.apache.hudi.utilities.streamer.TableExecutionContext;
 import org.apache.hudi.utilities.testutils.UtilitiesTestBase;
 
-import org.junit.jupiter.api.Disabled;
 import org.junit.jupiter.api.Test;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
@@ -150,18 +149,7 @@ public class TestHoodieMultiTableDeltaStreamer extends HoodieDeltaStreamerTestBa
         getStringWithAltKeys(streamer.getTableExecutionContexts().get(0).getProperties(),
             HoodieSchemaProviderConfig.SRC_SCHEMA_REGISTRY_URL));
   }
-
-  @Test
-  @Disabled
-  public void testInvalidIngestionProps() {
-    Exception e = assertThrows(Exception.class, () -> {
-      HoodieMultiTableDeltaStreamer.Config cfg = TestHelpers.getConfig(PROPS_FILENAME_TEST_SOURCE1, basePath + "/config", TestDataSource.class.getName(), true, true, null);
-      new HoodieMultiTableDeltaStreamer(cfg, jsc);
-    }, "Creation of execution object should fail without kafka topic");
-    LOG.debug("Creation of execution object failed with error: " + e.getMessage(), e);
-    assertTrue(e.getMessage().contains("Please provide valid table config arguments!"));
-  }
-
+  
   @Test //0 corresponds to fg
   public void testMultiTableExecutionWithKafkaSource() throws IOException {
     //create topics for each table
@@ -178,16 +166,16 @@ public class TestHoodieMultiTableDeltaStreamer extends HoodieDeltaStreamerTestBa
     HoodieMultiTableDeltaStreamer streamer = new HoodieMultiTableDeltaStreamer(cfg, jsc);
     List<TableExecutionContext> executionContexts = streamer.getTableExecutionContexts();
     TypedProperties properties = executionContexts.get(1).getProperties();
-    properties.setProperty("hoodie.deltastreamer.schemaprovider.source.schema.file", basePath + "/source_uber.avsc");
-    properties.setProperty("hoodie.deltastreamer.schemaprovider.target.schema.file", basePath + "/target_uber.avsc");
+    properties.setProperty("hoodie.streamer.schemaprovider.source.schema.file", basePath + "/source_uber.avsc");
+    properties.setProperty("hoodie.streamer.schemaprovider.target.schema.file", basePath + "/target_uber.avsc");
     properties.setProperty("hoodie.datasource.write.partitionpath.field", "timestamp");
-    properties.setProperty("hoodie.deltastreamer.source.kafka.topic", topicName2);
+    properties.setProperty("hoodie.streamer.source.kafka.topic", topicName2);
     executionContexts.get(1).setProperties(properties);
     TypedProperties properties1 = executionContexts.get(0).getProperties();
-    properties1.setProperty("hoodie.deltastreamer.schemaprovider.source.schema.file", basePath + "/source_short_trip_uber.avsc");
-    properties1.setProperty("hoodie.deltastreamer.schemaprovider.target.schema.file", basePath + "/target_short_trip_uber.avsc");
+    properties1.setProperty("hoodie.streamer.schemaprovider.source.schema.file", basePath + "/source_short_trip_uber.avsc");
+    properties1.setProperty("hoodie.streamer.schemaprovider.target.schema.file", basePath + "/target_short_trip_uber.avsc");
     properties1.setProperty("hoodie.datasource.write.partitionpath.field", "timestamp");
-    properties1.setProperty("hoodie.deltastreamer.source.kafka.topic", topicName1);
+    properties1.setProperty("hoodie.streamer.source.kafka.topic", topicName1);
     executionContexts.get(0).setProperties(properties1);
     String targetBasePath1 = executionContexts.get(0).getConfig().targetBasePath;
     String targetBasePath2 = executionContexts.get(1).getConfig().targetBasePath;
@@ -279,7 +267,8 @@ public class TestHoodieMultiTableDeltaStreamer extends HoodieDeltaStreamerTestBa
   private String populateCommonPropsAndWriteToFile() throws IOException {
     TypedProperties commonProps = new TypedProperties();
     populateCommonProps(commonProps, basePath);
-    UtilitiesTestBase.Helpers.savePropsToDFS(commonProps, fs, basePath + "/" + PROPS_FILENAME_TEST_PARQUET);
+    UtilitiesTestBase.Helpers.savePropsToDFS(
+        commonProps, storage, basePath + "/" + PROPS_FILENAME_TEST_PARQUET);
     return PROPS_FILENAME_TEST_PARQUET;
   }
 
@@ -288,7 +277,7 @@ public class TestHoodieMultiTableDeltaStreamer extends HoodieDeltaStreamerTestBa
     props.setProperty("include", "base.properties");
     props.setProperty("hoodie.datasource.write.recordkey.field", "_row_key");
     props.setProperty("hoodie.datasource.write.partitionpath.field", "partition_path");
-    props.setProperty("hoodie.deltastreamer.source.dfs.root", parquetSourceRoot);
+    props.setProperty("hoodie.streamer.source.dfs.root", parquetSourceRoot);
     return props;
   }
 

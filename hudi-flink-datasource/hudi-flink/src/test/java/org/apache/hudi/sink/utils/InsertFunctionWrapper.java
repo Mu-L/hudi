@@ -59,7 +59,7 @@ public class InsertFunctionWrapper<I> implements TestFunctionWrapper<I> {
   private final MockStreamingRuntimeContext runtimeContext;
   private final MockOperatorEventGateway gateway;
   private final MockOperatorCoordinatorContext coordinatorContext;
-  private final StreamWriteOperatorCoordinator coordinator;
+  private StreamWriteOperatorCoordinator coordinator;
   private final MockStateInitializationContext stateInitializationContext;
 
   private final boolean asyncClustering;
@@ -126,7 +126,7 @@ public class InsertFunctionWrapper<I> implements TestFunctionWrapper<I> {
     this.coordinator.checkpointCoordinator(checkpointId, new CompletableFuture<>());
 
     writeFunction.snapshotState(new MockFunctionSnapshotContext(checkpointId));
-    stateInitializationContext.getOperatorStateStore().checkpointBegin(checkpointId);
+    stateInitializationContext.checkpointBegin(checkpointId);
   }
 
   @Override
@@ -135,7 +135,7 @@ public class InsertFunctionWrapper<I> implements TestFunctionWrapper<I> {
   }
 
   public void checkpointComplete(long checkpointId) {
-    stateInitializationContext.getOperatorStateStore().checkpointSuccess(checkpointId);
+    stateInitializationContext.checkpointSuccess(checkpointId);
     coordinator.notifyCheckpointComplete(checkpointId);
     if (asyncClustering) {
       try {
@@ -148,6 +148,13 @@ public class InsertFunctionWrapper<I> implements TestFunctionWrapper<I> {
 
   public void coordinatorFails() throws Exception {
     this.coordinator.close();
+    this.coordinator.start();
+    this.coordinator.setExecutor(new MockCoordinatorExecutor(coordinatorContext));
+  }
+
+  public void restartCoordinator() throws Exception {
+    this.coordinator.close();
+    this.coordinator = new StreamWriteOperatorCoordinator(conf, this.coordinatorContext);
     this.coordinator.start();
     this.coordinator.setExecutor(new MockCoordinatorExecutor(coordinatorContext));
   }

@@ -27,14 +27,15 @@ import org.apache.hudi.common.model.HoodieAvroPayload;
 import org.apache.hudi.common.model.HoodieCommitMetadata;
 import org.apache.hudi.common.model.HoodieTableType;
 import org.apache.hudi.common.model.HoodieWriteStat;
+import org.apache.hudi.common.table.HoodieTableConfig;
 import org.apache.hudi.common.table.HoodieTableMetaClient;
-import org.apache.hudi.common.table.timeline.HoodieTimeline;
 import org.apache.hudi.common.testutils.InProcessTimeGenerator;
 import org.apache.hudi.common.testutils.NetworkTestUtils;
 import org.apache.hudi.common.testutils.SchemaTestUtil;
 import org.apache.hudi.common.testutils.minicluster.HdfsTestService;
 import org.apache.hudi.common.util.FileIOUtils;
 import org.apache.hudi.common.util.Option;
+import org.apache.hudi.hadoop.fs.HadoopFSUtils;
 
 import org.apache.avro.Schema;
 import org.apache.avro.generic.IndexedRecord;
@@ -74,6 +75,8 @@ import java.util.List;
 import java.util.Properties;
 import java.util.UUID;
 
+import static org.apache.hudi.common.testutils.HoodieTestUtils.COMMIT_METADATA_SER_DE;
+import static org.apache.hudi.common.testutils.HoodieTestUtils.INSTANT_FILE_NAME_GENERATOR;
 import static org.apache.hudi.common.table.timeline.TimelineMetadataUtils.serializeCommitMetadata;
 import static org.junit.jupiter.api.Assertions.fail;
 
@@ -159,11 +162,11 @@ public class HiveTestCluster implements BeforeAllCallback, AfterAllCallback, Bef
     String tablePathStr = tablePath(dbName, tableName);
     Path path = new Path(tablePathStr);
     FileIOUtils.deleteDirectory(new File(path.toString()));
-    HoodieTableMetaClient.withPropertyBuilder()
+    HoodieTableMetaClient.newTableBuilder()
         .setTableType(HoodieTableType.COPY_ON_WRITE)
         .setTableName(tableName)
         .setPayloadClass(HoodieAvroPayload.class)
-        .initTable(conf, path.toString());
+        .initTable(HadoopFSUtils.getStorageConfWithCopy(conf), path.toString());
     dfsCluster.getFileSystem().mkdirs(path);
     ZonedDateTime dateTime = ZonedDateTime.now();
     HoodieCommitMetadata commitMetadata = createPartitions(numberOfPartitions, true, dateTime, commitTime, path.toString());
@@ -171,9 +174,9 @@ public class HiveTestCluster implements BeforeAllCallback, AfterAllCallback, Bef
   }
 
   private void createCommitFile(HoodieCommitMetadata commitMetadata, String commitTime, String basePath) throws IOException {
-    byte[] bytes = serializeCommitMetadata(commitMetadata).get();
-    Path fullPath = new Path(basePath + "/" + HoodieTableMetaClient.METAFOLDER_NAME + "/"
-        + HoodieTimeline.makeCommitFileName(commitTime + "_" + InProcessTimeGenerator.createNewInstantTime()));
+    byte[] bytes = serializeCommitMetadata(COMMIT_METADATA_SER_DE, commitMetadata).get();
+    Path fullPath = new Path(basePath + "/" + HoodieTableMetaClient.METAFOLDER_NAME + "/" + HoodieTableMetaClient.TIMELINEFOLDER_NAME + "/"
+        + INSTANT_FILE_NAME_GENERATOR.makeCommitFileName(commitTime + "_" + InProcessTimeGenerator.createNewInstantTime()));
     OutputStream fsout = dfsCluster.getFileSystem().create(fullPath, true);
     fsout.write(bytes);
     fsout.close();
@@ -203,7 +206,7 @@ public class HiveTestCluster implements BeforeAllCallback, AfterAllCallback, Bef
       // Create 5 files
       String fileId = UUID.randomUUID().toString();
       Path filePath = new Path(partPath.toString() + "/" + FSUtils
-          .makeBaseFileName(commitTime, "1-0-1", fileId));
+          .makeBaseFileName(commitTime, "1-0-1", fileId, HoodieTableConfig.BASE_FILE_FORMAT.defaultValue().getFileExtension()));
       generateParquetData(filePath, isParquetSchemaSimple);
       HoodieWriteStat writeStat = new HoodieWriteStat();
       writeStat.setFileId(fileId);

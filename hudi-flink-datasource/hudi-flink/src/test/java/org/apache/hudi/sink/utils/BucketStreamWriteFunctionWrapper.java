@@ -150,7 +150,7 @@ public class BucketStreamWriteFunctionWrapper<I> implements TestFunctionWrapper<
     // checkpoint the coordinator first
     this.coordinator.checkpointCoordinator(checkpointId, new CompletableFuture<>());
     writeFunction.snapshotState(new MockFunctionSnapshotContext(checkpointId));
-    stateInitializationContext.getOperatorStateStore().checkpointBegin(checkpointId);
+    stateInitializationContext.checkpointBegin(checkpointId);
   }
 
   public void endInput() {
@@ -158,11 +158,22 @@ public class BucketStreamWriteFunctionWrapper<I> implements TestFunctionWrapper<
   }
 
   public void checkpointComplete(long checkpointId) {
-    stateInitializationContext.getOperatorStateStore().checkpointSuccess(checkpointId);
+    stateInitializationContext.checkpointSuccess(checkpointId);
     coordinator.notifyCheckpointComplete(checkpointId);
     if (asyncCompaction) {
       try {
         compactFunctionWrapper.compact(checkpointId);
+      } catch (Exception e) {
+        throw new HoodieException(e);
+      }
+    }
+  }
+
+  @Override
+  public void inlineCompaction() {
+    if (asyncCompaction) {
+      try {
+        compactFunctionWrapper.compact(1); // always uses a constant checkpoint ID.
       } catch (Exception e) {
         throw new HoodieException(e);
       }

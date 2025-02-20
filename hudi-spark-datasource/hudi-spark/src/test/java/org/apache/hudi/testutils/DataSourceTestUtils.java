@@ -18,10 +18,13 @@
 
 package org.apache.hudi.testutils;
 
-import org.apache.hudi.common.fs.FSUtils;
+import org.apache.hudi.HoodieDataSourceHelpers;
 import org.apache.hudi.common.table.HoodieTableMetaClient;
+import org.apache.hudi.common.table.timeline.HoodieTimeline;
 import org.apache.hudi.common.testutils.HoodieTestDataGenerator;
 import org.apache.hudi.common.util.FileIOUtils;
+import org.apache.hudi.hadoop.fs.HadoopFSUtils;
+import org.apache.hudi.storage.HoodieStorage;
 import org.apache.hudi.storage.StoragePath;
 
 import org.apache.avro.Schema;
@@ -68,6 +71,18 @@ public class DataSourceTestUtils {
       Object[] values = new Object[3];
       values[0] = HoodieTestDataGenerator.genPseudoRandomUUID(RANDOM).toString();
       values[1] = partitions.get(RANDOM.nextInt(3));
+      values[2] = new Date().getTime();
+      toReturn.add(RowFactory.create(values));
+    }
+    return toReturn;
+  }
+
+  public static List<Row> generateRandomRowsByPartition(int count, String partition) {
+    List<Row> toReturn = new ArrayList<>();
+    for (int i = 0; i < count; i++) {
+      Object[] values = new Object[3];
+      values[0] = HoodieTestDataGenerator.genPseudoRandomUUID(RANDOM).toString();
+      values[1] = partition;
       values[2] = new Date().getTime();
       toReturn.add(RowFactory.create(values));
     }
@@ -139,11 +154,38 @@ public class DataSourceTestUtils {
       LocatedFileStatus file = files.next();
       // skip meta folder
       if (file.isFile() && !file.getPath().toString().contains(HoodieTableMetaClient.METAFOLDER_NAME + StoragePath.SEPARATOR)) {
-        if (FSUtils.isBaseFile(file.getPath())) {
+        if (HadoopFSUtils.isBaseFile(file.getPath())) {
           return false;
         }
       }
     }
     return true;
+  }
+
+  public static String latestCommitCompletionTime(FileSystem fs, String basePath) {
+    return HoodieDataSourceHelpers.allCompletedCommitsCompactions(fs, basePath)
+        .getLatestCompletionTime().orElse(null);
+  }
+
+  public static String latestCommitCompletionTime(HoodieStorage storage, String basePath) {
+    return HoodieDataSourceHelpers.allCompletedCommitsCompactions(storage, basePath)
+        .getLatestCompletionTime().orElse(null);
+  }
+
+  public static String latestCommitRequestTime(HoodieStorage storage, String basePath) {
+    return HoodieDataSourceHelpers.allCompletedCommitsCompactions(storage, basePath)
+        .lastInstant().map(instant -> instant.requestedTime()).orElse(null);
+  }
+
+  public static String latestDeltaCommitCompletionTime(HoodieStorage storage, String basePath) {
+    return HoodieDataSourceHelpers.allCompletedCommitsCompactions(storage, basePath)
+        .filter(instant -> HoodieTimeline.DELTA_COMMIT_ACTION.equals(instant.getAction()))
+        .getLatestCompletionTime().orElse(null);
+  }
+
+  public static String latestDeltaCommitRequest(HoodieStorage storage, String basePath) {
+    return HoodieDataSourceHelpers.allCompletedCommitsCompactions(storage, basePath)
+        .filter(instant -> HoodieTimeline.DELTA_COMMIT_ACTION.equals(instant.getAction()))
+        .lastInstant().map(instant -> instant.requestedTime()).orElse(null);
   }
 }

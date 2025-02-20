@@ -21,21 +21,21 @@ package org.apache.hudi.client;
 import org.apache.hudi.avro.model.HoodieClusteringGroup;
 import org.apache.hudi.avro.model.HoodieClusteringPlan;
 import org.apache.hudi.client.embedded.EmbeddedTimelineService;
+import org.apache.hudi.client.utils.SparkReleaseResources;
 import org.apache.hudi.common.data.HoodieData;
 import org.apache.hudi.common.engine.HoodieEngineContext;
 import org.apache.hudi.common.model.HoodieRecord;
-import org.apache.hudi.common.table.timeline.HoodieTimeline;
 import org.apache.hudi.common.util.ClusteringUtils;
 import org.apache.hudi.common.util.Option;
 import org.apache.hudi.common.util.collection.Pair;
 import org.apache.hudi.config.HoodieWriteConfig;
 import org.apache.hudi.data.HoodieJavaRDD;
 import org.apache.hudi.exception.HoodieClusteringException;
+import org.apache.hudi.storage.StorageConfiguration;
 import org.apache.hudi.table.HoodieSparkTable;
 import org.apache.hudi.table.HoodieTable;
 import org.apache.hudi.table.action.HoodieWriteMetadata;
 
-import org.apache.hadoop.conf.Configuration;
 import org.apache.spark.api.java.JavaRDD;
 
 public class SparkRDDTableServiceClient<T> extends BaseHoodieTableServiceClient<HoodieData<HoodieRecord<T>>, HoodieData<WriteStatus>, JavaRDD<WriteStatus>> {
@@ -49,7 +49,7 @@ public class SparkRDDTableServiceClient<T> extends BaseHoodieTableServiceClient<
   protected void validateClusteringCommit(HoodieWriteMetadata<JavaRDD<WriteStatus>> clusteringMetadata, String clusteringCommitTime, HoodieTable table) {
     if (clusteringMetadata.getWriteStatuses().isEmpty()) {
       HoodieClusteringPlan clusteringPlan = ClusteringUtils.getClusteringPlan(
-              table.getMetaClient(), HoodieTimeline.getReplaceCommitRequestedInstant(clusteringCommitTime))
+              table.getMetaClient(), ClusteringUtils.getInflightClusteringInstant(clusteringCommitTime, table.getActiveTimeline(), table.getInstantGenerator()).get())
           .map(Pair::getRight).orElseThrow(() -> new HoodieClusteringException(
               "Unable to read clustering plan for instant: " + clusteringCommitTime));
       throw new HoodieClusteringException("Clustering plan produced 0 WriteStatus for " + clusteringCommitTime
@@ -65,12 +65,12 @@ public class SparkRDDTableServiceClient<T> extends BaseHoodieTableServiceClient<
   }
 
   @Override
-  protected HoodieData<WriteStatus> convertToWriteStatus(HoodieWriteMetadata<HoodieData<WriteStatus>> writeMetadata) {
-    return writeMetadata.getWriteStatuses();
+  protected HoodieTable<?, HoodieData<HoodieRecord<T>>, ?, HoodieData<WriteStatus>> createTable(HoodieWriteConfig config, StorageConfiguration<?> storageConf, boolean skipValidation) {
+    return createTableAndValidate(config, HoodieSparkTable::create, skipValidation);
   }
 
   @Override
-  protected HoodieTable<?, HoodieData<HoodieRecord<T>>, ?, HoodieData<WriteStatus>> createTable(HoodieWriteConfig config, Configuration hadoopConf) {
-    return HoodieSparkTable.create(config, context);
+  protected void releaseResources(String instantTime) {
+    SparkReleaseResources.releaseCachedData(context, config, basePath, instantTime);
   }
 }

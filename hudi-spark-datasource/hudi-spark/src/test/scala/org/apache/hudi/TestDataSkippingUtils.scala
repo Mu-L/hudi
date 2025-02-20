@@ -19,6 +19,8 @@ package org.apache.hudi
 
 import org.apache.hudi.ColumnStatsIndexSupport.composeIndexSchema
 import org.apache.hudi.testutils.HoodieSparkClientTestBase
+
+import org.apache.spark.sql.{Column, Row, SparkSession}
 import org.apache.spark.sql.HoodieCatalystExpressionUtils.resolveExpr
 import org.apache.spark.sql.catalyst.analysis.UnresolvedAttribute
 import org.apache.spark.sql.catalyst.encoders.DummyExpressionHolder
@@ -30,14 +32,14 @@ import org.apache.spark.sql.functions.{col, lower}
 import org.apache.spark.sql.hudi.DataSkippingUtils
 import org.apache.spark.sql.internal.SQLConf.SESSION_LOCAL_TIMEZONE
 import org.apache.spark.sql.types._
-import org.apache.spark.sql.{Column, HoodieCatalystExpressionUtils, Row, SparkSession}
 import org.junit.jupiter.api.Assertions.assertEquals
 import org.junit.jupiter.api.BeforeEach
 import org.junit.jupiter.params.ParameterizedTest
-import org.junit.jupiter.params.provider.Arguments.arguments
 import org.junit.jupiter.params.provider.{Arguments, MethodSource}
+import org.junit.jupiter.params.provider.Arguments.arguments
 
 import java.sql.Timestamp
+
 import scala.collection.JavaConverters._
 import scala.collection.immutable.HashSet
 
@@ -83,7 +85,7 @@ class TestDataSkippingUtils extends HoodieSparkClientTestBase with SparkAdapterS
       )
     )
 
-  val (indexSchema: StructType, targetIndexedColumns:  Seq[String]) = composeIndexSchema(indexedCols, indexedCols.toSet, sourceTableSchema)
+  val (indexSchema: StructType, targetIndexedColumns:  Seq[String]) = composeIndexSchema(indexedCols, indexedCols, sourceTableSchema)
 
   @ParameterizedTest
   @MethodSource(Array(
@@ -123,10 +125,10 @@ class TestDataSkippingUtils extends HoodieSparkClientTestBase with SparkAdapterS
   @MethodSource(Array("testStringsLookupFilterExpressionsSource"))
   def testStringsLookupFilterExpressions(sourceExpr: Expression, input: Seq[IndexRow], output: Seq[String]): Unit = {
     val resolvedExpr = resolveExpr(spark, sourceExpr, sourceTableSchema)
-    val lookupFilter = DataSkippingUtils.translateIntoColumnStatsIndexFilterExpr(resolvedExpr, indexSchema)
+    val lookupFilter = DataSkippingUtils.translateIntoColumnStatsIndexFilterExpr(resolvedExpr, indexedCols = indexedCols)
 
-    val spark2 = spark
-    import spark2.implicits._
+    val sparkB = spark
+    import sparkB.implicits._
 
     val indexDf = spark.createDataset(input)
 
@@ -153,7 +155,7 @@ class TestDataSkippingUtils extends HoodieSparkClientTestBase with SparkAdapterS
   }
 
   private def applyFilterExpr(resolvedExpr: Expression, input: Seq[IndexRow]): Seq[String] = {
-    val lookupFilter = DataSkippingUtils.translateIntoColumnStatsIndexFilterExpr(resolvedExpr, indexSchema)
+    val lookupFilter = DataSkippingUtils.translateIntoColumnStatsIndexFilterExpr(resolvedExpr, indexedCols = indexedCols)
 
     val indexDf = spark.createDataFrame(input.map(_.toRow).asJava, indexSchema)
 

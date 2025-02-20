@@ -39,6 +39,7 @@ import java.util.Map;
 import java.util.Properties;
 
 import static org.apache.hudi.common.table.HoodieTableConfig.POPULATE_META_FIELDS;
+import static org.apache.hudi.common.util.StringUtils.isNullOrEmpty;
 
 /**
  * This only use by reader returning.
@@ -51,6 +52,14 @@ public class HoodieAvroIndexedRecord extends HoodieRecord<IndexedRecord> {
 
   public HoodieAvroIndexedRecord(HoodieKey key, IndexedRecord data) {
     super(key, data);
+  }
+
+  public HoodieAvroIndexedRecord(HoodieKey key, IndexedRecord data, HoodieRecordLocation currentLocation) {
+    super(key, data, null, currentLocation, null);
+  }
+
+  public HoodieAvroIndexedRecord(IndexedRecord data, HoodieRecordLocation currentLocation) {
+    super(null, data, null, currentLocation, null);
   }
 
   public HoodieAvroIndexedRecord(
@@ -187,12 +196,15 @@ public class HoodieAvroIndexedRecord extends HoodieRecord<IndexedRecord> {
 
   @Override
   public Comparable<?> getOrderingValue(Schema recordSchema, Properties props) {
+    String orderingField = ConfigUtils.getOrderingField(props);
+    if (isNullOrEmpty(orderingField)) {
+      return DEFAULT_ORDERING_VALUE;
+    }
     boolean consistentLogicalTimestampEnabled = Boolean.parseBoolean(props.getProperty(
         KeyGeneratorOptions.KEYGENERATOR_CONSISTENT_LOGICAL_TIMESTAMP_ENABLED.key(),
         KeyGeneratorOptions.KEYGENERATOR_CONSISTENT_LOGICAL_TIMESTAMP_ENABLED.defaultValue()));
     return (Comparable<?>) HoodieAvroUtils.getNestedFieldVal((GenericRecord) data,
-        ConfigUtils.getOrderingField(props),
-        true, consistentLogicalTimestampEnabled);
+        orderingField, true, consistentLogicalTimestampEnabled);
   }
 
   @Override

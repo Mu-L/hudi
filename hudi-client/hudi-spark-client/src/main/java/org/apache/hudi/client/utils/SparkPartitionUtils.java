@@ -22,7 +22,7 @@ import org.apache.hudi.AvroConversionUtils;
 import org.apache.hudi.HoodieSparkUtils;
 import org.apache.hudi.SparkAdapterSupport$;
 import org.apache.hudi.common.util.Option;
-import org.apache.hudi.hadoop.fs.CachingPath;
+import org.apache.hudi.storage.StoragePath;
 
 import org.apache.avro.Schema;
 import org.apache.hadoop.conf.Configuration;
@@ -40,10 +40,10 @@ public class SparkPartitionUtils {
       return new Object[0];
     }
     SparkParsePartitionUtil sparkParsePartitionUtil = SparkAdapterSupport$.MODULE$.sparkAdapter().getSparkParsePartitionUtil();
-    return HoodieSparkUtils.parsePartitionColumnValues(
+    return HoodieSparkUtils.doParsePartitionColumnValues(
         partitionFields.get(),
         partitionPath,
-        new CachingPath(basePath),
+        new StoragePath(basePath),
         AvroConversionUtils.convertAvroSchemaToStructType(writerSchema),
         hadoopConf.get("timeZone", SQLConf.get().sessionLocalTimeZone()),
         sparkParsePartitionUtil,

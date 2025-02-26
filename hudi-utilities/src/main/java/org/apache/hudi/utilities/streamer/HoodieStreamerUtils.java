@@ -31,11 +31,16 @@ import org.apache.hudi.common.model.HoodieRecord;
 import org.apache.hudi.common.model.HoodieRecordPayload;
 import org.apache.hudi.common.model.HoodieSparkRecord;
 import org.apache.hudi.common.model.WriteOperationType;
+import org.apache.hudi.common.util.ConfigUtils;
 import org.apache.hudi.common.util.Either;
 import org.apache.hudi.common.util.Option;
+import org.apache.hudi.common.util.StringUtils;
 import org.apache.hudi.common.util.collection.ClosableIterator;
 import org.apache.hudi.common.util.collection.CloseableMappingIterator;
 import org.apache.hudi.exception.HoodieException;
+import org.apache.hudi.exception.HoodieKeyException;
+import org.apache.hudi.exception.HoodieKeyGeneratorException;
+import org.apache.hudi.exception.HoodieRecordCreationException;
 import org.apache.hudi.keygen.BuiltinKeyGenerator;
 import org.apache.hudi.keygen.KeyGenUtils;
 import org.apache.hudi.keygen.constant.KeyGeneratorOptions;
@@ -51,22 +56,23 @@ import org.apache.spark.sql.HoodieInternalRowUtils;
 import org.apache.spark.sql.avro.HoodieAvroDeserializer;
 import org.apache.spark.sql.catalyst.InternalRow;
 import org.apache.spark.sql.types.StructType;
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
 
-import java.util.ArrayList;
 import java.util.Arrays;
 import java.util.Iterator;
-import java.util.List;
 import java.util.Set;
 import java.util.stream.Collectors;
 
 import static org.apache.hudi.common.table.HoodieTableConfig.DROP_PARTITION_COLUMNS;
 import static org.apache.hudi.config.HoodieErrorTableConfig.ERROR_ENABLE_VALIDATE_RECORD_CREATION;
 
-
 /**
  * Util class for HoodieStreamer.
  */
 public class HoodieStreamerUtils {
+
+  private static final Logger LOG = LoggerFactory.getLogger(HoodieStreamerUtils.class);
 
   /**
    * Generates HoodieRecords for the avro data read from source.
@@ -77,8 +83,14 @@ public class HoodieStreamerUtils {
                                                                   SchemaProvider schemaProvider, HoodieRecord.HoodieRecordType recordType, boolean autoGenerateRecordKeys,
                                                                   String instantTime, Option<BaseErrorTableWriter> errorTableWriter) {
     boolean shouldCombine = cfg.filterDupes || cfg.operation.equals(WriteOperationType.UPSERT);
+    boolean shouldUseOrderingField = shouldCombine && !StringUtils.isNullOrEmpty(cfg.sourceOrderingField);
     boolean shouldErrorTable = errorTableWriter.isPresent() && props.getBoolean(ERROR_ENABLE_VALIDATE_RECORD_CREATION.key(), ERROR_ENABLE_VALIDATE_RECORD_CREATION.defaultValue());
+    boolean useConsistentLogicalTimestamp = ConfigUtils.getBooleanWithAltKeys(
+        props, KeyGeneratorOptions.KEYGENERATOR_CONSISTENT_LOGICAL_TIMESTAMP_ENABLED);
     Set<String> partitionColumns = getPartitionColumns(props);
+    String payloadClassName = StringUtils.isNullOrEmpty(cfg.payloadClassName)
+        ? HoodieRecordPayload.getAvroPayloadForMergeMode(cfg.recordMergeMode, cfg.payloadClassName)
+        : cfg.payloadClassName;
     return avroRDDOptional.map(avroRDD -> {
       SerializableSchema avroSchema = new SerializableSchema(schemaProvider.getTargetSchema());
       SerializableSchema processedAvroSchema = new SerializableSchema(isDropPartitionColumns(props) ? HoodieAvroUtils.removeMetadataFields(avroSchema.get()) : avroSchema.get());
@@ -86,31 +98,27 @@ public class HoodieStreamerUtils {
       if (recordType == HoodieRecord.HoodieRecordType.AVRO) {
         records = avroRDD.mapPartitions(
             (FlatMapFunction<Iterator<GenericRecord>, Either<HoodieRecord,String>>) genericRecordIterator -> {
+              TaskContext taskContext = TaskContext.get();
+              LOG.info("Creating HoodieRecords with stageId : {}, stage attempt no: {}, taskId : {}, task attempt no : {}, task attempt id : {} ",
+                  taskContext.stageId(), taskContext.stageAttemptNumber(), taskContext.partitionId(), taskContext.attemptNumber(),
+                  taskContext.taskAttemptId());
               if (autoGenerateRecordKeys) {
                 props.setProperty(KeyGenUtils.RECORD_KEY_GEN_PARTITION_ID_CONFIG, String.valueOf(TaskContext.getPartitionId()));
                 props.setProperty(KeyGenUtils.RECORD_KEY_GEN_INSTANT_TIME_CONFIG, instantTime);
               }
               BuiltinKeyGenerator builtinKeyGenerator = (BuiltinKeyGenerator) HoodieSparkKeyGeneratorFactory.createKeyGenerator(props);
-              List<Either<HoodieRecord,String>> avroRecords = new ArrayList<>();
-              while (genericRecordIterator.hasNext()) {
-                GenericRecord genRec = genericRecordIterator.next();
+              return new CloseableMappingIterator<>(ClosableIterator.wrap(genericRecordIterator), genRec -> {
                 try {
                   HoodieKey hoodieKey = new HoodieKey(builtinKeyGenerator.getRecordKey(genRec), builtinKeyGenerator.getPartitionPath(genRec));
                   GenericRecord gr = isDropPartitionColumns(props) ? HoodieAvroUtils.removeFields(genRec, partitionColumns) : genRec;
-                  HoodieRecordPayload payload = shouldCombine ? DataSourceUtils.createPayload(cfg.payloadClassName, gr,
-                      (Comparable) HoodieAvroUtils.getNestedFieldVal(gr, cfg.sourceOrderingField, false, props.getBoolean(
-                          KeyGeneratorOptions.KEYGENERATOR_CONSISTENT_LOGICAL_TIMESTAMP_ENABLED.key(),
-                          Boolean.parseBoolean(KeyGeneratorOptions.KEYGENERATOR_CONSISTENT_LOGICAL_TIMESTAMP_ENABLED.defaultValue()))))
-                      : DataSourceUtils.createPayload(cfg.payloadClassName, gr);
-                  avroRecords.add(Either.left(new HoodieAvroRecord<>(hoodieKey, payload)));
+                  HoodieRecordPayload payload = shouldUseOrderingField ? DataSourceUtils.createPayload(payloadClassName, gr,
+                      (Comparable) HoodieAvroUtils.getNestedFieldVal(gr, cfg.sourceOrderingField, false, useConsistentLogicalTimestamp))
+                      : DataSourceUtils.createPayload(payloadClassName, gr);
+                  return Either.left(new HoodieAvroRecord<>(hoodieKey, payload));
                 } catch (Exception e) {
-                  if (!shouldErrorTable) {
-                    throw e;
-                  }
-                  avroRecords.add(generateErrorRecord(genRec));
+                  return generateErrorRecordOrThrowException(genRec, e, shouldErrorTable);
                 }
-              }
-              return avroRecords.iterator();
+              });
             });
 
       } else if (recordType == HoodieRecord.HoodieRecordType.SPARK) {
@@ -135,10 +143,7 @@ public class HoodieStreamerUtils {
               return Either.left(new HoodieSparkRecord(new HoodieKey(recordKey, partitionPath),
                   HoodieInternalRowUtils.getCachedUnsafeProjection(baseStructType, targetStructType).apply(row), targetStructType, false));
             } catch (Exception e) {
-              if (!shouldErrorTable) {
-                throw e;
-              }
-              return generateErrorRecord(rec);
+              return generateErrorRecordOrThrowException(rec, e, shouldErrorTable);
             }
           });
 
@@ -159,9 +164,18 @@ public class HoodieStreamerUtils {
    * @return the representation of error record (empty {@link HoodieRecord} and the error record
    * String) for writing to error table.
    */
-  private static Either<HoodieRecord, String> generateErrorRecord(GenericRecord genRec) {
+  private static Either<HoodieRecord, String> generateErrorRecordOrThrowException(GenericRecord genRec, Exception e, boolean shouldErrorTable) {
+    if (!shouldErrorTable) {
+      if (e instanceof HoodieKeyException) {
+        throw (HoodieKeyException) e;
+      } else if (e instanceof HoodieKeyGeneratorException) {
+        throw (HoodieKeyGeneratorException) e;
+      } else {
+        throw new HoodieRecordCreationException("Failed to create Hoodie Record", e);
+      }
+    }
     try {
-      return Either.right(HoodieAvroUtils.avroToJsonString(genRec, false));
+      return Either.right(HoodieAvroUtils.safeAvroToJsonString(genRec));
     } catch (Exception ex) {
       throw new HoodieException("Failed to convert illegal record to json", ex);
     }

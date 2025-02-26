@@ -27,6 +27,8 @@ import org.apache.spark.sql.execution.LogicalRDD
 import org.apache.spark.sql.types.StructType
 import org.apache.spark.util.MutablePair
 
+import scala.collection.JavaConverters
+
 /**
  * Suite of utilities helping in handling instances of [[HoodieUnsafeRDD]]
  */

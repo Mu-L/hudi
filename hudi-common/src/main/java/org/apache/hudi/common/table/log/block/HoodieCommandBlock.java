@@ -20,6 +20,7 @@ package org.apache.hudi.common.table.log.block;
 
 import org.apache.hudi.common.util.Option;
 import org.apache.hudi.io.SeekableDataInputStream;
+import org.apache.hudi.storage.HoodieStorage;
 
 import java.util.HashMap;
 import java.util.Map;
@@ -45,7 +46,7 @@ public class HoodieCommandBlock extends HoodieLogBlock {
 
   public HoodieCommandBlock(Option<byte[]> content, Supplier<SeekableDataInputStream> inputStreamSupplier, boolean readBlockLazily,
                             Option<HoodieLogBlockContentLocation> blockContentLocation, Map<HeaderMetadataType, String> header,
-                            Map<HeaderMetadataType, String> footer) {
+                            Map<FooterMetadataType, String> footer) {
     super(header, footer, blockContentLocation, content, inputStreamSupplier, readBlockLazily);
     this.type =
         HoodieCommandBlockTypeEnum.values()[Integer.parseInt(header.get(HeaderMetadataType.COMMAND_BLOCK_TYPE))];
@@ -61,7 +62,7 @@ public class HoodieCommandBlock extends HoodieLogBlock {
   }
 
   @Override
-  public byte[] getContentBytes() {
+  public byte[] getContentBytes(HoodieStorage storage) {
     return new byte[0];
   }
 }

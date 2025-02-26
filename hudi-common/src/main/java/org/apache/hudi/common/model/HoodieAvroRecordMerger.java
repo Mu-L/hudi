@@ -18,13 +18,13 @@
 
 package org.apache.hudi.common.model;
 
-import org.apache.avro.Schema;
-import org.apache.avro.generic.IndexedRecord;
-
 import org.apache.hudi.common.config.TypedProperties;
 import org.apache.hudi.common.model.HoodieRecord.HoodieRecordType;
 import org.apache.hudi.common.util.Option;
 import org.apache.hudi.common.util.collection.Pair;
+
+import org.apache.avro.Schema;
+import org.apache.avro.generic.IndexedRecord;
 
 import java.io.IOException;
 import java.util.Properties;
@@ -39,7 +39,7 @@ public class HoodieAvroRecordMerger implements HoodieRecordMerger, OperationMode
 
   @Override
   public String getMergingStrategy() {
-    return HoodieRecordMerger.DEFAULT_MERGER_STRATEGY_UUID;
+    return HoodieRecordMerger.PAYLOAD_BASED_MERGE_STRATEGY_UUID;
   }
 
   @Override

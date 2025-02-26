@@ -18,7 +18,7 @@
 
 package org.apache.hudi.common.model;
 
-import org.apache.hudi.common.table.timeline.HoodieTimeline;
+import org.apache.hudi.common.table.timeline.InstantComparison;
 import org.apache.hudi.common.util.Option;
 
 import java.io.Serializable;
@@ -55,11 +55,17 @@ public class FileSlice implements Serializable {
   private final TreeSet<HoodieLogFile> logFiles;
 
   public FileSlice(FileSlice fileSlice) {
+    this(fileSlice, true);
+  }
+
+  private FileSlice(FileSlice fileSlice, boolean includeLogFiles) {
     this.baseInstantTime = fileSlice.baseInstantTime;
     this.baseFile = fileSlice.baseFile != null ? new HoodieBaseFile(fileSlice.baseFile) : null;
     this.fileGroupId = fileSlice.fileGroupId;
     this.logFiles = new TreeSet<>(HoodieLogFile.getReverseLogFileComparator());
-    fileSlice.logFiles.forEach(lf -> this.logFiles.add(new HoodieLogFile(lf)));
+    if (includeLogFiles) {
+      fileSlice.logFiles.forEach(lf -> this.logFiles.add(new HoodieLogFile(lf)));
+    }
   }
 
   public FileSlice(String partitionPath, String baseInstantTime, String fileId) {
@@ -88,6 +94,22 @@ public class FileSlice implements Serializable {
 
   public void addLogFile(HoodieLogFile logFile) {
     this.logFiles.add(logFile);
+  }
+
+  public FileSlice withLogFiles(boolean includeLogFiles) {
+    if (includeLogFiles || !hasLogFiles()) {
+      return this;
+    } else {
+      return new FileSlice(this, false);
+    }
+  }
+
+  public boolean hasBootstrapBase() {
+    return getBaseFile().isPresent() && getBaseFile().get().getBootstrapBaseFile().isPresent();
+  }
+
+  public boolean hasLogFiles() {
+    return !logFiles.isEmpty();
   }
 
   public Stream<HoodieLogFile> getLogFiles() {
@@ -128,7 +150,7 @@ public class FileSlice implements Serializable {
    */
   public String getLatestInstantTime() {
     Option<String> latestDeltaCommitTime = getLatestLogFile().map(HoodieLogFile::getDeltaCommitTime);
-    return latestDeltaCommitTime.isPresent() ? HoodieTimeline.maxInstant(latestDeltaCommitTime.get(), getBaseInstantTime()) : getBaseInstantTime();
+    return latestDeltaCommitTime.isPresent() ? InstantComparison.maxInstant(latestDeltaCommitTime.get(), getBaseInstantTime()) : getBaseInstantTime();
   }
 
   /**
@@ -140,13 +162,11 @@ public class FileSlice implements Serializable {
 
   @Override
   public String toString() {
-    final StringBuilder sb = new StringBuilder("FileSlice {");
-    sb.append("fileGroupId=").append(fileGroupId);
-    sb.append(", baseCommitTime=").append(baseInstantTime);
-    sb.append(", baseFile='").append(baseFile).append('\'');
-    sb.append(", logFiles='").append(logFiles).append('\'');
-    sb.append('}');
-    return sb.toString();
+    return "FileSlice {" + "fileGroupId=" + fileGroupId
+        + ", baseCommitTime=" + baseInstantTime
+        + ", baseFile='" + baseFile + '\''
+        + ", logFiles='" + logFiles + '\''
+        + '}';
   }
 
   @Override

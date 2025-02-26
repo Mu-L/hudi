@@ -57,8 +57,8 @@ public class FlinkConsistentBucketUpdateStrategy<T extends HoodieRecordPayload> 
   private static final Logger LOG = LoggerFactory.getLogger(FlinkConsistentBucketUpdateStrategy.class);
 
   private boolean initialized = false;
-  private List<String> indexKeyFields;
-  private Map<String, Pair<String, ConsistentBucketIdentifier>> partitionToIdentifier;
+  private final List<String> indexKeyFields;
+  private final Map<String, Pair<String, ConsistentBucketIdentifier>> partitionToIdentifier;
   private String lastRefreshInstant = HoodieTimeline.INIT_INSTANT_TS;
 
   public FlinkConsistentBucketUpdateStrategy(HoodieFlinkWriteClient writeClient, List<String> indexKeyFields) {
@@ -75,13 +75,13 @@ public class FlinkConsistentBucketUpdateStrategy<T extends HoodieRecordPayload> 
     List<HoodieInstant> instants = ClusteringUtils.getPendingClusteringInstantTimes(table.getMetaClient());
     if (!instants.isEmpty()) {
       HoodieInstant latestPendingReplaceInstant = instants.get(instants.size() - 1);
-      if (latestPendingReplaceInstant.getTimestamp().compareTo(lastRefreshInstant) > 0) {
+      if (latestPendingReplaceInstant.requestedTime().compareTo(lastRefreshInstant) > 0) {
         LOG.info("Found new pending replacement commit. Last pending replacement commit is {}.", latestPendingReplaceInstant);
         this.table = table;
         this.fileGroupsInPendingClustering = table.getFileSystemView().getFileGroupsInPendingClustering()
             .map(Pair::getKey).collect(Collectors.toSet());
         // TODO throw exception if exists bucket merge plan
-        this.lastRefreshInstant = latestPendingReplaceInstant.getTimestamp();
+        this.lastRefreshInstant = latestPendingReplaceInstant.requestedTime();
         this.partitionToIdentifier.clear();
       }
     }

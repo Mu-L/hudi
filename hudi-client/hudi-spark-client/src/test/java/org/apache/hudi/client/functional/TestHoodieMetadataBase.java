@@ -19,6 +19,7 @@
 package org.apache.hudi.client.functional;
 
 import org.apache.hudi.client.timeline.HoodieTimelineArchiver;
+import org.apache.hudi.client.timeline.versioning.v2.TimelineArchiverV2;
 import org.apache.hudi.common.config.HoodieMetadataConfig;
 import org.apache.hudi.common.config.HoodieStorageConfig;
 import org.apache.hudi.common.model.HoodieCommitMetadata;
@@ -41,11 +42,11 @@ import org.apache.hudi.metadata.HoodieTableMetadata;
 import org.apache.hudi.metadata.HoodieTableMetadataWriter;
 import org.apache.hudi.metadata.SparkHoodieBackedTableMetadataWriter;
 import org.apache.hudi.metrics.MetricsReporterType;
+import org.apache.hudi.storage.StoragePath;
 import org.apache.hudi.table.HoodieSparkTable;
 import org.apache.hudi.table.HoodieTable;
 import org.apache.hudi.testutils.HoodieSparkClientTestHarness;
 
-import org.apache.hadoop.fs.Path;
 import org.junit.jupiter.api.AfterEach;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
@@ -99,8 +100,8 @@ public class TestHoodieMetadataBase extends HoodieSparkClientTestHarness {
     this.tableType = tableType;
     initPath();
     initSparkContexts("TestHoodieMetadata");
-    initFileSystem();
-    fs.mkdirs(new Path(basePath));
+    initHoodieStorage();
+    storage.createDirectory(new StoragePath(basePath));
     initTimelineService();
     initMetaClient(tableType);
     initTestDataGenerator();
@@ -116,7 +117,7 @@ public class TestHoodieMetadataBase extends HoodieSparkClientTestHarness {
   protected void initWriteConfigAndMetatableWriter(HoodieWriteConfig writeConfig, boolean enableMetadataTable) throws IOException {
     this.writeConfig = writeConfig;
     if (enableMetadataTable) {
-      metadataWriter = SparkHoodieBackedTableMetadataWriter.create(hadoopConf, writeConfig, context);
+      metadataWriter = SparkHoodieBackedTableMetadataWriter.create(storageConf, writeConfig, context);
       // reload because table configs could have been updated
       metaClient = HoodieTableMetaClient.reload(metaClient);
       testTable = HoodieMetadataTestTable.of(metaClient, metadataWriter, Option.of(context));
@@ -290,7 +291,7 @@ public class TestHoodieMetadataBase extends HoodieSparkClientTestHarness {
 
   protected void archiveDataTable(HoodieWriteConfig writeConfig, HoodieTableMetaClient metaClient) throws IOException {
     HoodieTable table = HoodieSparkTable.create(writeConfig, context, metaClient);
-    HoodieTimelineArchiver archiver = new HoodieTimelineArchiver(writeConfig, table);
+    HoodieTimelineArchiver archiver = new TimelineArchiverV2(writeConfig, table);
     archiver.archiveIfRequired(context);
   }
 

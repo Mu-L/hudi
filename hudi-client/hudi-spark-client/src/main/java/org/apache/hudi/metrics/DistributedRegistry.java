@@ -18,21 +18,22 @@
 
 package org.apache.hudi.metrics;
 
+import org.apache.hudi.common.metrics.Registry;
+
+import org.apache.spark.api.java.JavaSparkContext;
+import org.apache.spark.util.AccumulatorV2;
+
 import java.io.Serializable;
 import java.util.HashMap;
 import java.util.Map;
 import java.util.concurrent.ConcurrentHashMap;
-
-import org.apache.hudi.common.metrics.Registry;
-import org.apache.spark.api.java.JavaSparkContext;
-import org.apache.spark.util.AccumulatorV2;
 
 /**
  * Lightweight Metrics Registry to track Hudi events.
  */
 public class DistributedRegistry extends AccumulatorV2<Map<String, Long>, Map<String, Long>>
     implements Registry, Serializable {
-  private String name;
+  private final String name;
   ConcurrentHashMap<String, Long> counters = new ConcurrentHashMap<>();
 
   public DistributedRegistry(String name) {

@@ -18,12 +18,14 @@
 
 package org.apache.hudi.sink.utils;
 
+import org.apache.hudi.client.model.HoodieFlinkInternalRow;
 import org.apache.hudi.common.model.HoodieRecord;
 import org.apache.hudi.configuration.OptionsResolver;
 import org.apache.hudi.exception.HoodieException;
 import org.apache.hudi.sink.StreamWriteFunction;
 import org.apache.hudi.sink.StreamWriteOperatorCoordinator;
 import org.apache.hudi.sink.bucket.BucketStreamWriteFunction;
+import org.apache.hudi.sink.common.AbstractWriteFunction;
 import org.apache.hudi.sink.event.WriteMetadataEvent;
 import org.apache.hudi.sink.transform.RowDataToHoodieFunction;
 import org.apache.hudi.util.AvroSchemaConverter;
@@ -60,6 +62,7 @@ import java.util.concurrent.CompletableFuture;
  */
 public class BucketStreamWriteFunctionWrapper<I> implements TestFunctionWrapper<I> {
   protected final Configuration conf;
+  protected final RowType rowType;
 
   private final IOManager ioManager;
   protected final StreamingRuntimeContext runtimeContext;
@@ -69,14 +72,14 @@ public class BucketStreamWriteFunctionWrapper<I> implements TestFunctionWrapper<
   protected final MockStateInitializationContext stateInitializationContext;
 
   /**
-   * Function that converts row data to HoodieRecord.
+   * Function that converts row data to HoodieFlinkInternalRow.
    */
-  protected RowDataToHoodieFunction<RowData, HoodieRecord<?>> toHoodieFunction;
+  protected RowDataToHoodieFunction<RowData, HoodieFlinkInternalRow> toHoodieFunction;
 
   /**
    * Stream write function.
    */
-  protected StreamWriteFunction<HoodieRecord<?>> writeFunction;
+  protected StreamWriteFunction writeFunction;
 
   private CompactFunctionWrapper compactFunctionWrapper;
 
@@ -100,6 +103,7 @@ public class BucketStreamWriteFunctionWrapper<I> implements TestFunctionWrapper<
     this.runtimeContext = new MockStreamingRuntimeContext(false, 1, 0, environment);
     this.gateway = new MockOperatorEventGateway();
     this.conf = conf;
+    this.rowType = (RowType) AvroSchemaConverter.convertToDataType(StreamerUtil.getSourceSchema(conf)).getLogicalType();
     // one function
     this.coordinatorContext = new MockOperatorCoordinatorContext(new OperatorID(), 1);
     this.coordinator = new StreamWriteOperatorCoordinator(conf, this.coordinatorContext);
@@ -117,7 +121,6 @@ public class BucketStreamWriteFunctionWrapper<I> implements TestFunctionWrapper<
   public void openFunction() throws Exception {
     this.coordinator.start();
     this.coordinator.setExecutor(new MockCoordinatorExecutor(coordinatorContext));
-    RowType rowType = (RowType) AvroSchemaConverter.convertToDataType(StreamerUtil.getSourceSchema(conf)).getLogicalType();
     toHoodieFunction = new RowDataToHoodieFunction<>(rowType, conf);
     toHoodieFunction.setRuntimeContext(runtimeContext);
     toHoodieFunction.open(conf);
@@ -130,7 +133,7 @@ public class BucketStreamWriteFunctionWrapper<I> implements TestFunctionWrapper<
   }
 
   public void invoke(I record) throws Exception {
-    HoodieRecord<?> hoodieRecord = toHoodieFunction.map((RowData) record);
+    HoodieFlinkInternalRow hoodieRecord = toHoodieFunction.map((RowData) record);
     writeFunction.processElement(hoodieRecord, null, null);
   }
 
@@ -150,7 +153,7 @@ public class BucketStreamWriteFunctionWrapper<I> implements TestFunctionWrapper<
     // checkpoint the coordinator first
     this.coordinator.checkpointCoordinator(checkpointId, new CompletableFuture<>());
     writeFunction.snapshotState(new MockFunctionSnapshotContext(checkpointId));
-    stateInitializationContext.getOperatorStateStore().checkpointBegin(checkpointId);
+    stateInitializationContext.checkpointBegin(checkpointId);
   }
 
   public void endInput() {
@@ -158,11 +161,22 @@ public class BucketStreamWriteFunctionWrapper<I> implements TestFunctionWrapper<
   }
 
   public void checkpointComplete(long checkpointId) {
-    stateInitializationContext.getOperatorStateStore().checkpointSuccess(checkpointId);
+    stateInitializationContext.checkpointSuccess(checkpointId);
     coordinator.notifyCheckpointComplete(checkpointId);
     if (asyncCompaction) {
       try {
         compactFunctionWrapper.compact(checkpointId);
+      } catch (Exception e) {
+        throw new HoodieException(e);
+      }
+    }
+  }
+
+  @Override
+  public void inlineCompaction() {
+    if (asyncCompaction) {
+      try {
+        compactFunctionWrapper.compact(1); // always uses a constant checkpoint ID.
       } catch (Exception e) {
         throw new HoodieException(e);
       }
@@ -180,6 +194,11 @@ public class BucketStreamWriteFunctionWrapper<I> implements TestFunctionWrapper<
 
   public StreamWriteOperatorCoordinator getCoordinator() {
     return coordinator;
+  }
+
+  @Override
+  public AbstractWriteFunction getWriteFunction() {
+    return this.writeFunction;
   }
 
   public MockOperatorCoordinatorContext getCoordinatorContext() {
@@ -205,7 +224,7 @@ public class BucketStreamWriteFunctionWrapper<I> implements TestFunctionWrapper<
     coordinator.handleEventFromOperator(0, getNextEvent());
   }
 
-  protected StreamWriteFunction<HoodieRecord<?>> createWriteFunction() {
-    return new BucketStreamWriteFunction<>(conf);
+  protected StreamWriteFunction createWriteFunction() {
+    return new BucketStreamWriteFunction(conf, rowType);
   }
 }

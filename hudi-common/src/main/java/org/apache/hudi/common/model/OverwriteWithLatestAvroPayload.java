@@ -29,9 +29,9 @@ import org.apache.avro.generic.IndexedRecord;
 import java.io.IOException;
 import java.util.Objects;
 
+import static org.apache.hudi.common.model.HoodieRecord.DEFAULT_ORDERING_VALUE;
+
 /**
- * Default payload.
- *
  * <ol>
  * <li> preCombine - Picks the latest delta record for a key, based on an ordering field;
  * <li> combineAndGetUpdateValue/getInsertValue - Simply overwrites storage with latest delta record
@@ -45,21 +45,12 @@ public class OverwriteWithLatestAvroPayload extends BaseAvroPayload
   }
 
   public OverwriteWithLatestAvroPayload(Option<GenericRecord> record) {
-    this(record.isPresent() ? record.get() : null, 0); // natural order
+    this(record.isPresent() ? record.get() : null, DEFAULT_ORDERING_VALUE); // natural order
   }
 
   @Override
   public OverwriteWithLatestAvroPayload preCombine(OverwriteWithLatestAvroPayload oldValue) {
-    if (oldValue.recordBytes.length == 0) {
-      // use natural order for delete record
-      return this;
-    }
-    if (oldValue.orderingVal.compareTo(orderingVal) > 0) {
-      // pick the payload with greatest ordering value
-      return oldValue;
-    } else {
-      return this;
-    }
+    return this;
   }
 
   @Override
@@ -73,7 +64,7 @@ public class OverwriteWithLatestAvroPayload extends BaseAvroPayload
       return Option.empty();
     }
 
-    return Option.of((IndexedRecord) HoodieAvroUtils.bytesToAvro(recordBytes, schema));
+    return Option.of(HoodieAvroUtils.bytesToAvro(recordBytes, schema));
   }
 
   /**
@@ -89,5 +80,9 @@ public class OverwriteWithLatestAvroPayload extends BaseAvroPayload
   @Override
   public Comparable<?> getOrderingValue() {
     return this.orderingVal;
+  }
+
+  public byte[] getRecordBytes() {
+    return recordBytes;
   }
 }

@@ -33,14 +33,20 @@ fi
 echo "CLI_BUNDLE_JAR: $CLI_BUNDLE_JAR"
 echo "SPARK_BUNDLE_JAR: $SPARK_BUNDLE_JAR"
 
-HUDI_CONF_DIR="${DIR}"/conf
+if [ -z "$HUDI_CONF_DIR" ]; then
+  echo "HUDI_CONF_DIR not set, setting HUDI_CONF_DIR"
+  HUDI_CONF_DIR="${DIR}"/conf
+fi
+
+echo "HUDI_CONF_DIR: $HUDI_CONF_DIR"
+
 # hudi aux lib contains jakarta.el jars, which need to be put directly on class path
 HUDI_AUX_LIB="${DIR}"/auxlib
 
 if [ ! -d $HUDI_AUX_LIB ]; then
-  echo "Downloading necessary auxiliary jars for Hudi CLI"
-  wget https://repo1.maven.org/maven2/org/glassfish/jakarta.el/$JAKARTA_EL_VERSION/jakarta.el-$JAKARTA_EL_VERSION.jar -P auxlib
-  wget https://repo1.maven.org/maven2/jakarta/el/jakarta.el-api/$JAKARTA_EL_VERSION/jakarta.el-api-$JAKARTA_EL_VERSION.jar -P auxlib
+  echo "Downloading necessary auxiliary jars for Hudi CLI to $HUDI_AUX_LIB"
+  wget https://repo1.maven.org/maven2/org/glassfish/jakarta.el/$JAKARTA_EL_VERSION/jakarta.el-$JAKARTA_EL_VERSION.jar -P $HUDI_AUX_LIB
+  wget https://repo1.maven.org/maven2/jakarta/el/jakarta.el-api/$JAKARTA_EL_VERSION/jakarta.el-api-$JAKARTA_EL_VERSION.jar -P $HUDI_AUX_LIB
 fi
 
 . "${DIR}"/conf/hudi-env.sh

@@ -18,10 +18,10 @@
 package org.apache.spark.sql.hudi.procedure
 
 import org.apache.hudi.common.model.HoodieTableType
-import org.apache.hudi.common.table.HoodieTableMetaClient
 import org.apache.hudi.functional.TestBootstrap
 import org.apache.hudi.keygen.constant.KeyGeneratorOptions
 import org.apache.hudi.storage.StoragePath
+import org.apache.hudi.testutils.HoodieClientTestUtils.createMetaClient
 
 import org.apache.spark.api.java.JavaSparkContext
 import org.apache.spark.sql.{Dataset, Row}
@@ -54,6 +54,7 @@ class TestBootstrapProcedure extends HoodieSparkProcedureTestBase {
       }
 
       spark.sql("set hoodie.bootstrap.parallelism = 20")
+      spark.sql("set hoodie.metadata.index.column.stats.enable = false")
       checkAnswer(
         s"""call run_bootstrap(
            |table => '$tableName',
@@ -93,6 +94,8 @@ class TestBootstrapProcedure extends HoodieSparkProcedureTestBase {
       spark.sql("set hoodie.datasource.write.row.writer.enable = false")
       spark.sql(s"""call run_clustering(table => '$tableName')""".stripMargin)
       assertResult(0)(spark.sql(s"select * from $tableName").except(beforeClusterDf).count())
+
+      spark.sessionState.conf.unsetConf("unset hoodie.metadata.index.column.stats.enable") // HUDI-8774
     }
   }
 
@@ -119,6 +122,7 @@ class TestBootstrapProcedure extends HoodieSparkProcedureTestBase {
       }
 
       spark.sql("set hoodie.bootstrap.parallelism = 20")
+      spark.sql("set hoodie.metadata.index.column.stats.enable = false")
       checkAnswer(
         s"""call run_bootstrap(
            |table => '$tableName',
@@ -153,13 +157,12 @@ class TestBootstrapProcedure extends HoodieSparkProcedureTestBase {
         result.length
       }
 
-      val metaClient = HoodieTableMetaClient.builder().setBasePath(tablePath)
-        .setConf(spark.sessionState.newHadoopConf()).build()
+      val metaClient = createMetaClient(spark, tablePath)
 
       assertResult("true") {
         metaClient.getTableConfig.getString(KeyGeneratorOptions.HIVE_STYLE_PARTITIONING_ENABLE)
       };
-
+      spark.sessionState.conf.unsetConf("unset hoodie.metadata.index.column.stats.enable")
     }
   }
 
@@ -182,6 +185,7 @@ class TestBootstrapProcedure extends HoodieSparkProcedureTestBase {
       df.write.parquet(sourcePath)
 
       spark.sql("set hoodie.bootstrap.parallelism = 20")
+      spark.sql("set hoodie.metadata.index.column.stats.enable = false")
       // run bootstrap
       checkAnswer(
         s"""call run_bootstrap(
@@ -215,6 +219,7 @@ class TestBootstrapProcedure extends HoodieSparkProcedureTestBase {
       spark.sql("set hoodie.datasource.write.row.writer.enable = false")
       spark.sql(s"""call run_clustering(table => '$tableName')""".stripMargin)
       assertResult(0)(spark.sql(s"select * from $tableName").except(beforeClusterDf).count())
+      spark.sessionState.conf.unsetConf("unset hoodie.metadata.index.column.stats.enable")
     }
   }
 
@@ -242,6 +247,7 @@ class TestBootstrapProcedure extends HoodieSparkProcedureTestBase {
 
       spark.sql("set hoodie.bootstrap.parallelism = 20")
       spark.sql("set hoodie.datasource.write.precombine.field=timestamp")
+      spark.sql("set hoodie.metadata.index.column.stats.enable = false")
 
       checkAnswer(
         s"""call run_bootstrap(
@@ -255,6 +261,7 @@ class TestBootstrapProcedure extends HoodieSparkProcedureTestBase {
            |bootstrap_overwrite => true)""".stripMargin) {
         Seq(0)
       }
+      spark.sessionState.conf.unsetConf("unset hoodie.metadata.index.column.stats.enable")
     }
   }
 }

@@ -20,6 +20,7 @@
 package org.apache.hudi.utilities.deltastreamer;
 
 import org.apache.hudi.TestHoodieSparkUtils;
+import org.apache.hudi.client.WriteStatus;
 import org.apache.hudi.common.util.Option;
 import org.apache.hudi.utilities.streamer.ErrorEvent;
 
@@ -41,6 +42,7 @@ import java.util.Map;
 import java.util.stream.Stream;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
+import static org.junit.jupiter.api.Assertions.assertTrue;
 
 
 /**
@@ -170,7 +172,7 @@ public class TestHoodieDeltaStreamerSchemaEvolutionExtensive extends TestHoodieD
     }
     assertRecordCount(numRecords);
 
-    Dataset<Row> df = sparkSession.read().format("hudi").options(readOpts).load(tableBasePath);
+    Dataset<Row> df = sparkSession.read().format("hudi").load(tableBasePath);
     df.show(9,false);
     df.select(updateColumn).show(9);
     for (String condition : conditions.keySet()) {
@@ -178,24 +180,47 @@ public class TestHoodieDeltaStreamerSchemaEvolutionExtensive extends TestHoodieD
     }
 
     if (withErrorTable) {
-      List<ErrorEvent> recs = new ArrayList<>();
-      for (String key : TestErrorTable.commited.keySet()) {
-        Option<JavaRDD> errors = TestErrorTable.commited.get(key);
-        if (errors.isPresent()) {
-          if (!errors.get().isEmpty()) {
-            recs.addAll(errors.get().collect());
-          }
+      validateErrorTable(1, this.writeErrorTableInParallelWithBaseTable, reason);
+    }
+  }
+
+  protected static void validateErrorTable(int numErrorRecords, boolean isErrorTableUnionWriteEnabled) {
+    validateErrorTable(numErrorRecords, isErrorTableUnionWriteEnabled, null);
+  }
+
+  protected static void validateErrorTable(int numErrorRecords, boolean isErrorTableUnionWriteEnabled, ErrorEvent.ErrorReason reason) {
+    List recs = new ArrayList<>();
+    for (String key : TestErrorTable.commited.keySet()) {
+      Option<JavaRDD> errors = TestErrorTable.commited.get(key);
+      if (errors.isPresent()) {
+        if (!errors.get().isEmpty()) {
+          List collect = errors.get().collect();
+          recs.addAll(collect);
         }
       }
-      assertEquals(1, recs.size());
-      assertEquals(recs.get(0).getReason(), reason);
+    }
+    if (numErrorRecords > 0) {
+      if (isErrorTableUnionWriteEnabled) {
+        // Union (parallel execution) is executed if values in committed map are of type WriteStatus
+        assertTrue(recs.get(0) instanceof WriteStatus);
+        assertEquals(numErrorRecords, recs.stream().mapToLong(e -> ((WriteStatus) e).getTotalRecords()).sum());
+      } else {
+        // sequential flow is executed if values in committed map are of type ErrorEvent
+        assertTrue(recs.get(0) instanceof ErrorEvent);
+        assertEquals(numErrorRecords, recs.size());
+        if (reason != null) {
+          assertEquals(((List<ErrorEvent>) recs).get(0).getReason(), reason);
+        }
+      }
+    } else {
+      assertEquals(0, recs.size());
     }
   }
 
   protected static Stream<Arguments> testArgs() {
     Stream.Builder<Arguments> b = Stream.builder();
     //only testing row-writer enabled for now
-    for (Boolean rowWriterEnable : new Boolean[]{true}) {
+    for (Boolean rowWriterEnable : new Boolean[]{false, true}) {
       for (Boolean addFilegroups : new Boolean[]{false, true}) {
         for (Boolean multiLogFiles : new Boolean[]{false, true}) {
           for (Boolean shouldCluster : new Boolean[]{false, true}) {
@@ -212,15 +237,39 @@ public class TestHoodieDeltaStreamerSchemaEvolutionExtensive extends TestHoodieD
     return b.build();
   }
 
+  protected static Stream<Arguments> testErrorTableArgs() {
+    Stream.Builder<Arguments> b = Stream.builder();
+    //only testing row-writer enabled for now
+    for (Boolean writeErrorTableInParallel : new Boolean[] {false, true}) {
+      for (Boolean rowWriterEnable : new Boolean[] {false, true}) {
+        for (Boolean addFilegroups : new Boolean[] {false, true}) {
+          for (Boolean multiLogFiles : new Boolean[] {false, true}) {
+            for (Boolean shouldCluster : new Boolean[] {false, true}) {
+              for (String tableType : new String[] {"COPY_ON_WRITE", "MERGE_ON_READ"}) {
+                if (!multiLogFiles || tableType.equals("MERGE_ON_READ")) {
+                  b.add(Arguments.of(tableType, shouldCluster, false, rowWriterEnable, addFilegroups, multiLogFiles, writeErrorTableInParallel));
+                }
+              }
+            }
+            b.add(Arguments.of("MERGE_ON_READ", false, true, rowWriterEnable, addFilegroups, multiLogFiles, writeErrorTableInParallel));
+          }
+        }
+      }
+    }
+    return b.build();
+  }
+
   @ParameterizedTest
-  @MethodSource("testArgs")
+  @MethodSource("testErrorTableArgs")
   public void testErrorTable(String tableType,
                              Boolean shouldCluster,
                              Boolean shouldCompact,
                              Boolean rowWriterEnable,
                              Boolean addFilegroups,
-                             Boolean multiLogFiles) throws Exception {
+                             Boolean multiLogFiles,
+                             Boolean writeErrorTableInParallel) throws Exception {
     this.withErrorTable = true;
+    this.writeErrorTableInParallelWithBaseTable = writeErrorTableInParallel;
     this.useSchemaProvider = false;
     this.useTransformer = false;
     this.tableType = tableType;
@@ -233,14 +282,16 @@ public class TestHoodieDeltaStreamerSchemaEvolutionExtensive extends TestHoodieD
   }
 
   @ParameterizedTest
-  @MethodSource("testArgs")
+  @MethodSource("testErrorTableArgs")
   public void testErrorTableWithSchemaProvider(String tableType,
                                                Boolean shouldCluster,
                                                Boolean shouldCompact,
                                                Boolean rowWriterEnable,
                                                Boolean addFilegroups,
-                                               Boolean multiLogFiles) throws Exception {
+                                               Boolean multiLogFiles,
+                                               Boolean writeErrorTableInParallel) throws Exception {
     this.withErrorTable = true;
+    this.writeErrorTableInParallelWithBaseTable = writeErrorTableInParallel;
     this.useSchemaProvider = true;
     this.useTransformer = false;
     this.tableType = tableType;
@@ -253,14 +304,16 @@ public class TestHoodieDeltaStreamerSchemaEvolutionExtensive extends TestHoodieD
   }
 
   @ParameterizedTest
-  @MethodSource("testArgs")
+  @MethodSource("testErrorTableArgs")
   public void testErrorTableWithTransformer(String tableType,
                              Boolean shouldCluster,
                              Boolean shouldCompact,
                              Boolean rowWriterEnable,
                              Boolean addFilegroups,
-                             Boolean multiLogFiles) throws Exception {
+                                            Boolean multiLogFiles,
+                                            Boolean writeErrorTableInParallel) throws Exception {
     this.withErrorTable = true;
+    this.writeErrorTableInParallelWithBaseTable = writeErrorTableInParallel;
     this.useSchemaProvider = true;
     this.useTransformer = true;
     this.tableType = tableType;
@@ -442,7 +495,7 @@ public class TestHoodieDeltaStreamerSchemaEvolutionExtensive extends TestHoodieD
   protected String typePromoUpdates;
 
   protected void assertDataType(String colName, DataType expectedType) {
-    assertEquals(expectedType, sparkSession.read().format("hudi").options(readOpts).load(tableBasePath).select(colName).schema().fields()[0].dataType());
+    assertEquals(expectedType, sparkSession.read().format("hudi").load(tableBasePath).select(colName).schema().fields()[0].dataType());
   }
 
   protected void testTypePromotionBase(String colName, DataType startType, DataType updateType) throws Exception {
@@ -499,7 +552,7 @@ public class TestHoodieDeltaStreamerSchemaEvolutionExtensive extends TestHoodieD
       assertFileNumber(numFiles, false);
     }
     assertRecordCount(numRecords);
-    sparkSession.read().format("hudi").options(readOpts).load(tableBasePath).select(colName).show(9);
+    sparkSession.read().format("hudi").load(tableBasePath).select(colName).show(9);
     assertDataType(colName, endType);
   }
 

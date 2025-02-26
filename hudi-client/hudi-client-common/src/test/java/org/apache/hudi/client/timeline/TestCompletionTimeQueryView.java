@@ -19,15 +19,17 @@
 package org.apache.hudi.client.timeline;
 
 import org.apache.hudi.DummyActiveAction;
+import org.apache.hudi.client.timeline.versioning.v2.LSMTimelineWriter;
 import org.apache.hudi.common.engine.TaskContextSupplier;
 import org.apache.hudi.common.model.HoodieCommitMetadata;
 import org.apache.hudi.common.model.HoodieTableType;
 import org.apache.hudi.common.model.WriteOperationType;
 import org.apache.hudi.common.table.HoodieTableMetaClient;
+import org.apache.hudi.common.table.log.InstantRange;
 import org.apache.hudi.common.table.timeline.ActiveAction;
 import org.apache.hudi.common.table.timeline.CompletionTimeQueryView;
-import org.apache.hudi.common.table.timeline.HoodieActiveTimeline;
 import org.apache.hudi.common.table.timeline.HoodieInstant;
+import org.apache.hudi.common.table.timeline.TimelineUtils;
 import org.apache.hudi.common.testutils.HoodieTestTable;
 import org.apache.hudi.common.testutils.HoodieTestUtils;
 import org.apache.hudi.common.util.Option;
@@ -38,19 +40,23 @@ import org.apache.hudi.index.HoodieIndex;
 import org.apache.hudi.storage.StoragePath;
 import org.apache.hudi.table.HoodieTable;
 
-import org.apache.hadoop.conf.Configuration;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.io.TempDir;
 
 import java.io.File;
 import java.util.ArrayList;
 import java.util.Arrays;
+import java.util.Collections;
 import java.util.List;
 import java.util.stream.Collectors;
 
 import static org.apache.hudi.common.table.timeline.TimelineMetadataUtils.serializeCommitMetadata;
+import static org.apache.hudi.common.testutils.HoodieTestUtils.INSTANT_GENERATOR;
+import static org.apache.hudi.common.testutils.HoodieTestUtils.INSTANT_FILE_NAME_GENERATOR;
+import static org.apache.hudi.common.testutils.HoodieTestUtils.TIMELINE_FACTORY;
 import static org.hamcrest.CoreMatchers.is;
 import static org.hamcrest.MatcherAssert.assertThat;
+import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 import static org.mockito.Mockito.mock;
@@ -67,9 +73,11 @@ public class TestCompletionTimeQueryView {
   void testReadCompletionTime() throws Exception {
     String tableName = "testTable";
     String tablePath = tempFile.getAbsolutePath() + StoragePath.SEPARATOR + tableName;
-    HoodieTableMetaClient metaClient = HoodieTestUtils.init(new Configuration(), tablePath, HoodieTableType.COPY_ON_WRITE, tableName);
+    HoodieTableMetaClient metaClient = HoodieTestUtils.init(
+        HoodieTestUtils.getDefaultStorageConf(), tablePath, HoodieTableType.COPY_ON_WRITE, tableName);
     prepareTimeline(tablePath, metaClient);
-    try (CompletionTimeQueryView view = new CompletionTimeQueryView(metaClient, String.format("%08d", 3))) {
+    try (CompletionTimeQueryView view =
+             metaClient.getTimelineLayout().getTimelineFactory().createCompletionTimeQueryView(metaClient, String.format("%08d", 3))) {
       // query completion time from LSM timeline
       for (int i = 3; i < 7; i++) {
         assertThat(view.getCompletionTime(String.format("%08d", i)).orElse(""), is(String.format("%08d", i + 1000)));
@@ -96,9 +104,11 @@ public class TestCompletionTimeQueryView {
   void testReadStartTime() throws Exception {
     String tableName = "testTable";
     String tablePath = tempFile.getAbsolutePath() + StoragePath.SEPARATOR + tableName;
-    HoodieTableMetaClient metaClient = HoodieTestUtils.init(new Configuration(), tablePath, HoodieTableType.COPY_ON_WRITE, tableName);
+    HoodieTableMetaClient metaClient = HoodieTestUtils.init(
+        HoodieTestUtils.getDefaultStorageConf(), tablePath, HoodieTableType.COPY_ON_WRITE, tableName);
     prepareTimeline(tablePath, metaClient);
-    try (CompletionTimeQueryView view = new CompletionTimeQueryView(metaClient, String.format("%08d", 3))) {
+    try (CompletionTimeQueryView view =
+             metaClient.getTimelineLayout().getTimelineFactory().createCompletionTimeQueryView(metaClient, String.format("%08d", 3))) {
       // query start time from LSM timeline
       assertThat(getInstantTimeSetFormattedString(view, 3 + 1000, 6 + 1000), is("00000003,00000004,00000005,00000006"));
       // query start time from active timeline
@@ -113,8 +123,28 @@ public class TestCompletionTimeQueryView {
     }
   }
 
+  @Test
+  void testGetInstantTimesWithOnlyEndCompletionTime() throws Exception {
+    String tableName = "testTable";
+    String tablePath = tempFile.getAbsolutePath() + StoragePath.SEPARATOR + tableName;
+    HoodieTableMetaClient metaClient = HoodieTestUtils.init(
+        HoodieTestUtils.getDefaultStorageConf(), tablePath, HoodieTableType.COPY_ON_WRITE, tableName);
+    prepareTimeline(tablePath, metaClient);
+    try (CompletionTimeQueryView view =
+             metaClient.getTimelineLayout().getTimelineFactory().createCompletionTimeQueryView(metaClient, String.format("%08d", 3))) {
+      // Fetch instant matching the completion time provided
+      assertEquals(Collections.singletonList("00000009"), view.getInstantTimes(metaClient.getActiveTimeline(), Option.empty(), Option.of("00001009"), InstantRange.RangeType.CLOSED_CLOSED));
+      // Fetch instant just before the completion time provided
+      assertEquals(Collections.singletonList("00000010"), view.getInstantTimes(metaClient.getActiveTimeline(), Option.empty(), Option.of("00001011"), InstantRange.RangeType.CLOSED_CLOSED));
+      // Fall back case where only archive instants are before the completion time provided
+      assertEquals(Arrays.asList("00000001", "00000002", "00000003", "00000004", "00000005"),
+          view.getInstantTimes(metaClient.getActiveTimeline(), Option.empty(), Option.of("00001005"), InstantRange.RangeType.CLOSED_CLOSED));
+    }
+  }
+
   private String getInstantTimeSetFormattedString(CompletionTimeQueryView view, int completionTime1, int completionTime2) {
-    return view.getStartTimes(String.format("%08d", completionTime1), String.format("%08d", completionTime2), s -> String.format("%08d", Integer.parseInt(s) - 1000))
+    return view.getInstantTimes(String.format("%08d", completionTime1), String.format("%08d", completionTime2),
+            s -> String.format("%08d", Integer.parseInt(s) - 1000))
         .stream().sorted().collect(Collectors.joining(","));
   }
 
@@ -132,19 +162,23 @@ public class TestCompletionTimeQueryView {
       testTable.addCommit(instantTime, Option.of(completionTime), Option.of(metadata));
       activeActions.add(
           new DummyActiveAction(
-              new HoodieInstant(HoodieInstant.State.COMPLETED, "commit", instantTime, completionTime),
-              serializeCommitMetadata(metadata).get()));
+              INSTANT_GENERATOR.createNewInstant(HoodieInstant.State.COMPLETED, "commit", instantTime, completionTime),
+              serializeCommitMetadata(metaClient.getCommitMetadataSerDe(), metadata).get()));
     }
     testTable.addRequestedCommit(String.format("%08d", 11));
-    List<HoodieInstant> instants = new HoodieActiveTimeline(metaClient, false).getInstantsAsStream().sorted().collect(Collectors.toList());
+    List<HoodieInstant> instants = TIMELINE_FACTORY.createActiveTimeline(metaClient, false).getInstantsAsStream().sorted().collect(Collectors.toList());
     LSMTimelineWriter writer = LSMTimelineWriter.getInstance(writeConfig, getMockHoodieTable(metaClient));
     // archive [1,2], [3,4], [5,6] separately
     writer.write(activeActions.subList(0, 2), Option.empty(), Option.empty());
     writer.write(activeActions.subList(2, 4), Option.empty(), Option.empty());
     writer.write(activeActions.subList(4, 6), Option.empty(), Option.empty());
     // reconcile the active timeline
-    instants.subList(0, 3 * 6).forEach(instant -> HoodieActiveTimeline.deleteInstantFile(metaClient.getFs(), metaClient.getMetaPath(), instant));
-    ValidationUtils.checkState(metaClient.reloadActiveTimeline().filterCompletedInstants().countInstants() == 4, "should archive 6 instants with 4 as active");
+    instants.subList(0, 3 * 6).forEach(
+        instant -> TimelineUtils.deleteInstantFile(metaClient.getStorage(),
+            metaClient.getTimelinePath(), instant, INSTANT_FILE_NAME_GENERATOR));
+    ValidationUtils.checkState(
+        metaClient.reloadActiveTimeline().filterCompletedInstants().countInstants() == 4,
+        "should archive 6 instants with 4 as active");
   }
 
   @SuppressWarnings("rawtypes")

@@ -20,7 +20,6 @@ package org.apache.hudi.utilities;
 
 import org.apache.hudi.client.common.HoodieSparkEngineContext;
 import org.apache.hudi.common.config.HoodieMetadataConfig;
-import org.apache.hudi.common.config.SerializableConfiguration;
 import org.apache.hudi.common.engine.HoodieEngineContext;
 import org.apache.hudi.common.fs.FSUtils;
 import org.apache.hudi.common.model.HoodieBaseFile;
@@ -28,14 +27,19 @@ import org.apache.hudi.common.model.HoodiePartitionMetadata;
 import org.apache.hudi.common.table.HoodieTableConfig;
 import org.apache.hudi.common.table.HoodieTableMetaClient;
 import org.apache.hudi.common.table.timeline.HoodieInstant;
-import org.apache.hudi.common.table.timeline.HoodieTimeline;
 import org.apache.hudi.common.table.view.HoodieTableFileSystemView;
 import org.apache.hudi.common.table.view.TableFileSystemView.BaseFileOnlyView;
 import org.apache.hudi.common.util.Option;
 import org.apache.hudi.hadoop.fs.HadoopFSUtils;
+import org.apache.hudi.storage.HoodieStorage;
+import org.apache.hudi.storage.HoodieStorageUtils;
+import org.apache.hudi.storage.StorageConfiguration;
+import org.apache.hudi.storage.StoragePath;
+import org.apache.hudi.storage.hadoop.HoodieHadoopStorage;
 
 import com.beust.jcommander.JCommander;
 import com.beust.jcommander.Parameter;
+import org.apache.hadoop.conf.Configuration;
 import org.apache.hadoop.fs.FileStatus;
 import org.apache.hadoop.fs.FileSystem;
 import org.apache.hadoop.fs.FileUtil;
@@ -54,6 +58,8 @@ import java.util.stream.Stream;
 
 import scala.Tuple2;
 
+import static org.apache.hudi.common.table.timeline.InstantComparison.LESSER_THAN_OR_EQUALS;
+import static org.apache.hudi.common.table.timeline.InstantComparison.compareTimestamps;
 import static org.apache.hudi.utilities.UtilHelpers.buildSparkConf;
 
 /**
@@ -81,11 +87,12 @@ public class HoodieSnapshotCopier implements Serializable {
   public void snapshot(JavaSparkContext jsc, String baseDir, final String outputDir,
                        final boolean useFileListingFromMetadata) throws IOException {
     FileSystem fs = HadoopFSUtils.getFs(baseDir, jsc.hadoopConfiguration());
-    final SerializableConfiguration serConf = new SerializableConfiguration(jsc.hadoopConfiguration());
-    final HoodieTableMetaClient tableMetadata = HoodieTableMetaClient.builder().setConf(fs.getConf()).setBasePath(baseDir).build();
-    final BaseFileOnlyView fsView = new HoodieTableFileSystemView(tableMetadata,
-        tableMetadata.getActiveTimeline().getWriteTimeline().filterCompletedInstants());
+    final StorageConfiguration<?> storageConf = HadoopFSUtils.getStorageConfWithCopy(jsc.hadoopConfiguration());
+    final HoodieTableMetaClient tableMetadata = HoodieTableMetaClient.builder()
+        .setConf(HadoopFSUtils.getStorageConfWithCopy(fs.getConf())).setBasePath(baseDir).build();
     HoodieEngineContext context = new HoodieSparkEngineContext(jsc);
+    final BaseFileOnlyView fsView = HoodieTableFileSystemView.fileListingBasedFileSystemView(context, tableMetadata,
+        tableMetadata.getActiveTimeline().getWriteTimeline().filterCompletedInstants());
     // Get the latest commit
     Option<HoodieInstant> latestCommit =
         tableMetadata.getActiveTimeline().getWriteTimeline().filterCompletedInstants().lastInstant();
@@ -93,11 +100,12 @@ public class HoodieSnapshotCopier implements Serializable {
       LOG.warn("No commits present. Nothing to snapshot");
       return;
     }
-    final String latestCommitTimestamp = latestCommit.get().getTimestamp();
+    final String latestCommitTimestamp = latestCommit.get().requestedTime();
     LOG.info(String.format("Starting to snapshot latest version files which are also no-late-than %s.",
         latestCommitTimestamp));
 
-    List<String> partitions = FSUtils.getAllPartitionPaths(context, baseDir, useFileListingFromMetadata);
+    List<String> partitions = FSUtils.getAllPartitionPaths(
+        context, new HoodieHadoopStorage(fs), baseDir, useFileListingFromMetadata);
     if (partitions.size() > 0) {
       LOG.info(String.format("The job needs to copy %d partitions.", partitions.size()));
 
@@ -112,15 +120,15 @@ public class HoodieSnapshotCopier implements Serializable {
 
       List<Tuple2<String, String>> filesToCopy = context.flatMap(partitions, partition -> {
         // Only take latest version files <= latestCommit.
-        FileSystem fs1 = HadoopFSUtils.getFs(baseDir, serConf.newCopy());
+        HoodieStorage storage1 = HoodieStorageUtils.getStorage(baseDir, storageConf);
         List<Tuple2<String, String>> filePaths = new ArrayList<>();
         Stream<HoodieBaseFile> dataFiles = fsView.getLatestBaseFilesBeforeOrOn(partition, latestCommitTimestamp);
         dataFiles.forEach(hoodieDataFile -> filePaths.add(new Tuple2<>(partition, hoodieDataFile.getPath())));
 
         // also need to copy over partition metadata
-        Path partitionMetaFile = HoodiePartitionMetadata.getPartitionMetafilePath(fs1,
-            FSUtils.getPartitionPath(baseDir, partition)).get();
-        if (fs1.exists(partitionMetaFile)) {
+        StoragePath partitionMetaFile = HoodiePartitionMetadata.getPartitionMetafilePath(storage1,
+            FSUtils.constructAbsolutePath(baseDir, partition)).get();
+        if (storage1.exists(partitionMetaFile)) {
           filePaths.add(new Tuple2<>(partition, partitionMetaFile.toString()));
         }
 
@@ -130,8 +138,8 @@ public class HoodieSnapshotCopier implements Serializable {
       context.foreach(filesToCopy, tuple -> {
         String partition = tuple._1();
         Path sourceFilePath = new Path(tuple._2());
-        Path toPartitionPath = FSUtils.getPartitionPath(outputDir, partition);
-        FileSystem ifs = HadoopFSUtils.getFs(baseDir, serConf.newCopy());
+        Path toPartitionPath = HadoopFSUtils.constructAbsolutePathInHadoopPath(outputDir, partition);
+        FileSystem ifs = HadoopFSUtils.getFs(baseDir, storageConf.unwrapCopyAs(Configuration.class));
 
         if (!ifs.exists(toPartitionPath)) {
           ifs.mkdirs(toPartitionPath);
@@ -152,8 +160,8 @@ public class HoodieSnapshotCopier implements Serializable {
                   if (fileStatus.isDirectory()) {
                     return false;
                   }
-                  String instantTime = FSUtils.getCommitFromCommitFile(path.getName());
-                  return HoodieTimeline.compareTimestamps(instantTime, HoodieTimeline.LESSER_THAN_OR_EQUALS, latestCommitTimestamp);
+                  String instantTime = tableMetadata.getInstantFileNameParser().extractTimestamp(path.getName());
+                  return compareTimestamps(instantTime, LESSER_THAN_OR_EQUALS, latestCommitTimestamp);
                 }
               }).toArray(FileStatus[]::new);
       for (FileStatus commitStatus : commitFilesToCopy) {

@@ -17,15 +17,16 @@
 
 package org.apache.spark.sql.hudi.command.procedures
 
+import org.apache.hudi.{AvroConversionUtils, HoodieCLIUtils, HoodieFileIndex}
 import org.apache.hudi.DataSourceReadOptions.{QUERY_TYPE, QUERY_TYPE_SNAPSHOT_OPT_VAL}
 import org.apache.hudi.client.SparkRDDWriteClient
-import org.apache.hudi.common.table.timeline.{HoodieActiveTimeline, HoodieTimeline}
 import org.apache.hudi.common.table.{HoodieTableMetaClient, TableSchemaResolver}
-import org.apache.hudi.common.util.ValidationUtils.checkArgument
+import org.apache.hudi.common.table.timeline.HoodieTimeline
 import org.apache.hudi.common.util.{ClusteringUtils, HoodieTimer, Option => HOption}
+import org.apache.hudi.common.util.ValidationUtils.checkArgument
 import org.apache.hudi.config.{HoodieClusteringConfig, HoodieLockConfig}
 import org.apache.hudi.exception.HoodieClusteringException
-import org.apache.hudi.{AvroConversionUtils, HoodieCLIUtils, HoodieFileIndex}
+
 import org.apache.spark.internal.Logging
 import org.apache.spark.sql.HoodieCatalystExpressionUtils.{resolveExpr, splitPartitionAndDataPredicates}
 import org.apache.spark.sql.Row
@@ -34,6 +35,7 @@ import org.apache.spark.sql.execution.datasources.FileStatusCache
 import org.apache.spark.sql.types._
 
 import java.util.function.Supplier
+
 import scala.collection.JavaConverters._
 
 class RunClusteringProcedure extends BaseProcedure
@@ -87,7 +89,7 @@ class RunClusteringProcedure extends BaseProcedure
     val limit = getArgValueOrDefault(args, PARAMETERS(10))
 
     val basePath: String = getBasePath(tableName, tablePath)
-    val metaClient = HoodieTableMetaClient.builder.setConf(jsc.hadoopConfiguration()).setBasePath(basePath).build
+    val metaClient = createMetaClient(jsc, basePath)
     var confs: Map[String, String] = Map.empty
 
     val selectedPartitions: String = (parts, predicate) match {
@@ -140,15 +142,8 @@ class RunClusteringProcedure extends BaseProcedure
         logInfo("No options")
     }
 
-    if (metaClient.getTableConfig.isMetadataTableAvailable) {
-      if (!confs.contains(HoodieLockConfig.LOCK_PROVIDER_CLASS_NAME.key)) {
-        confs = confs ++ HoodieCLIUtils.getLockOptions(basePath)
-        logInfo("Auto config filesystem lock provider for metadata table")
-      }
-    }
-
     val pendingClusteringInstants = ClusteringUtils.getAllPendingClusteringPlans(metaClient)
-      .iterator().asScala.map(_.getLeft.getTimestamp).toSeq.sortBy(f => f)
+      .iterator().asScala.map(_.getLeft.requestedTime).toSeq.sortBy(f => f)
 
     var (filteredPendingClusteringInstants, operation) = HoodieProcedureUtils.filterPendingInstantsAndGetOperation(
       pendingClusteringInstants, specificInstants.asInstanceOf[Option[String]], op.asInstanceOf[Option[String]], limit.asInstanceOf[Option[Int]])
@@ -157,7 +152,11 @@ class RunClusteringProcedure extends BaseProcedure
     try {
       client = HoodieCLIUtils.createHoodieWriteClient(sparkSession, basePath, confs,
         tableName.asInstanceOf[Option[String]])
-
+      if (metaClient.getTableConfig.isMetadataTableAvailable) {
+        if (!confs.contains(HoodieLockConfig.LOCK_PROVIDER_CLASS_NAME.key)) {
+          confs = confs ++ HoodieCLIUtils.getLockOptions(basePath, metaClient.getBasePath.toUri.getScheme, client.getConfig.getCommonConfig.getProps())
+        }
+      }
       if (operation.isSchedule) {
         val instantTime = client.createNewInstantTime()
         if (client.scheduleClusteringAtInstant(instantTime, HOption.empty())) {
@@ -174,9 +173,9 @@ class RunClusteringProcedure extends BaseProcedure
       }
 
       val clusteringInstants = metaClient.reloadActiveTimeline().getInstants.iterator().asScala
-        .filter(p => p.getAction == HoodieTimeline.REPLACE_COMMIT_ACTION && filteredPendingClusteringInstants.contains(p.getTimestamp))
+        .filter(p => p.getAction == HoodieTimeline.REPLACE_COMMIT_ACTION && filteredPendingClusteringInstants.contains(p.requestedTime))
         .toSeq
-        .sortBy(f => f.getTimestamp)
+        .sortBy(f => f.requestedTime)
         .reverse
 
       val clusteringPlans = clusteringInstants.map(instant =>
@@ -185,12 +184,12 @@ class RunClusteringProcedure extends BaseProcedure
 
       if (showInvolvedPartitions) {
         clusteringPlans.map { p =>
-          Row(p.get().getLeft.getTimestamp, p.get().getRight.getInputGroups.size(),
-            p.get().getLeft.getState.name(), HoodieCLIUtils.extractPartitions(p.get().getRight.getInputGroups.asScala))
+          Row(p.get().getLeft.requestedTime, p.get().getRight.getInputGroups.size(),
+            p.get().getLeft.getState.name(), HoodieCLIUtils.extractPartitions(p.get().getRight.getInputGroups.asScala.toSeq))
         }
       } else {
         clusteringPlans.map { p =>
-          Row(p.get().getLeft.getTimestamp, p.get().getRight.getInputGroups.size(), p.get().getLeft.getState.name(), "*")
+          Row(p.get().getLeft.requestedTime, p.get().getRight.getInputGroups.size(), p.get().getLeft.getState.name(), "*")
         }
       }
     } finally {
@@ -203,7 +202,7 @@ class RunClusteringProcedure extends BaseProcedure
   override def build: Procedure = new RunClusteringProcedure()
 
   def prunePartition(metaClient: HoodieTableMetaClient, predicate: String): String = {
-    val options = Map(QUERY_TYPE.key() -> QUERY_TYPE_SNAPSHOT_OPT_VAL, "path" -> metaClient.getBasePath)
+    val options = Map(QUERY_TYPE.key() -> QUERY_TYPE_SNAPSHOT_OPT_VAL, "path" -> metaClient.getBasePath.toString)
     val hoodieFileIndex = HoodieFileIndex(sparkSession, metaClient, None, options,
       FileStatusCache.getOrCreate(sparkSession))
 

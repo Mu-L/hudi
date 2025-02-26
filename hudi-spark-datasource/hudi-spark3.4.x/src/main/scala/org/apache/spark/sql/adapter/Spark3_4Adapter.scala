@@ -17,26 +17,30 @@
 
 package org.apache.spark.sql.adapter
 
-import org.apache.avro.Schema
 import org.apache.hudi.Spark34HoodieFileScanRDD
+
+import org.apache.avro.Schema
+import org.apache.hadoop.conf.Configuration
+import org.apache.spark.api.java.JavaSparkContext
+import org.apache.spark.sql._
 import org.apache.spark.sql.avro._
 import org.apache.spark.sql.catalyst.InternalRow
-import org.apache.spark.sql.catalyst.analysis.EliminateSubqueryAliases
+import org.apache.spark.sql.catalyst.analysis.{EliminateSubqueryAliases, ResolvedTable}
 import org.apache.spark.sql.catalyst.catalog.CatalogTable
 import org.apache.spark.sql.catalyst.expressions.{AttributeReference, Expression}
 import org.apache.spark.sql.catalyst.parser.ParserInterface
 import org.apache.spark.sql.catalyst.planning.PhysicalOperation
 import org.apache.spark.sql.catalyst.plans.logical._
 import org.apache.spark.sql.catalyst.util.METADATA_COL_ATTR_KEY
-import org.apache.spark.sql.connector.catalog.V2TableWithV1Fallback
-import org.apache.spark.sql.execution.datasources.parquet.{ParquetFileFormat, Spark34LegacyHoodieParquetFileFormat}
-import org.apache.spark.sql.execution.datasources.v2.DataSourceV2Relation
+import org.apache.spark.sql.connector.catalog.{V1Table, V2TableWithV1Fallback}
 import org.apache.spark.sql.execution.datasources._
+import org.apache.spark.sql.execution.datasources.parquet.{ParquetFileFormat, Spark34LegacyHoodieParquetFileFormat, Spark34ParquetReader, SparkParquetReader}
+import org.apache.spark.sql.execution.datasources.v2.DataSourceV2Relation
 import org.apache.spark.sql.hudi.analysis.TableValuedFunctions
+import org.apache.spark.sql.internal.SQLConf
 import org.apache.spark.sql.parser.{HoodieExtendedParserInterface, HoodieSpark3_4ExtendedSqlParser}
 import org.apache.spark.sql.types.{DataType, Metadata, MetadataBuilder, StructType}
 import org.apache.spark.sql.vectorized.ColumnarBatchRow
-import org.apache.spark.sql._
 import org.apache.spark.storage.StorageLevel
 import org.apache.spark.storage.StorageLevel._
 
@@ -54,6 +58,8 @@ class Spark3_4Adapter extends BaseSpark3Adapter {
         //       on top of it
         case PhysicalOperation(_, _, DataSourceV2Relation(v2: V2TableWithV1Fallback, _, _, _, _)) if isHoodieTable(v2.v1Table) =>
           Some(v2.v1Table)
+        case ResolvedTable(_, _, V1Table(v1Table), _) if isHoodieTable(v1Table) =>
+          Some(v1Table)
         case _ => None
       }
     }
@@ -123,5 +129,25 @@ class Spark3_4Adapter extends BaseSpark3Adapter {
     case MEMORY_AND_DISK_SER_2 => "MEMORY_AND_DISK_SER_2"
     case OFF_HEAP => "OFF_HEAP"
     case _ => throw new IllegalArgumentException(s"Invalid StorageLevel: $level")
+  }
+
+  /**
+   * Get parquet file reader
+   *
+   * @param vectorized true if vectorized reading is not prohibited due to schema, reading mode, etc
+   * @param sqlConf    the [[SQLConf]] used for the read
+   * @param options    passed as a param to the file format
+   * @param hadoopConf some configs will be set for the hadoopConf
+   * @return parquet file reader
+   */
+  override def createParquetFileReader(vectorized: Boolean,
+                                       sqlConf: SQLConf,
+                                       options: Map[String, String],
+                                       hadoopConf: Configuration): SparkParquetReader = {
+    Spark34ParquetReader.build(vectorized, sqlConf, options, hadoopConf)
+  }
+
+  override def stopSparkContext(jssc: JavaSparkContext, exitCode: Int): Unit = {
+    jssc.sc.stop(exitCode)
   }
 }

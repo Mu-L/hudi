@@ -25,17 +25,17 @@ import org.apache.hudi.cli.testutils.ShellEvaluationResultUtil;
 import org.apache.hudi.client.common.HoodieSparkEngineContext;
 import org.apache.hudi.common.config.HoodieMetadataConfig;
 import org.apache.hudi.common.model.HoodieTableType;
+import org.apache.hudi.common.table.HoodieTableVersion;
 import org.apache.hudi.common.table.timeline.HoodieActiveTimeline;
 import org.apache.hudi.common.table.timeline.HoodieInstant;
 import org.apache.hudi.common.table.timeline.HoodieTimeline;
-import org.apache.hudi.common.table.timeline.versioning.TimelineLayoutVersion;
 import org.apache.hudi.common.testutils.HoodieTestDataGenerator;
 import org.apache.hudi.config.HoodieWriteConfig;
+import org.apache.hudi.hadoop.fs.HadoopFSUtils;
 import org.apache.hudi.metadata.HoodieTableMetadata;
 import org.apache.hudi.metadata.SparkHoodieBackedTableMetadataWriter;
 import org.apache.hudi.storage.StoragePath;
 
-import org.apache.hadoop.fs.Path;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Disabled;
 import org.junit.jupiter.api.Test;
@@ -45,6 +45,7 @@ import org.springframework.shell.Shell;
 
 import java.io.IOException;
 
+import static org.apache.hudi.common.testutils.HoodieTestUtils.INSTANT_GENERATOR;
 import static org.junit.jupiter.api.Assertions.assertAll;
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
@@ -71,7 +72,8 @@ public class ITTestSavepointsCommand extends HoodieCLIIntegrationTestBase {
     // Create table and connect
     new TableCommand().createTable(
         tablePath, "test_table", HoodieTableType.COPY_ON_WRITE.name(),
-        "", TimelineLayoutVersion.VERSION_1, "org.apache.hudi.common.model.HoodieAvroPayload");
+        "", HoodieTableVersion.current().versionCode(),
+        "org.apache.hudi.common.model.HoodieAvroPayload");
   }
 
   /**
@@ -82,7 +84,8 @@ public class ITTestSavepointsCommand extends HoodieCLIIntegrationTestBase {
     // generate four savepoints
     for (int i = 100; i < 104; i++) {
       String instantTime = String.valueOf(i);
-      HoodieTestDataGenerator.createCommitFile(tablePath, instantTime, jsc.hadoopConfiguration());
+      HoodieTestDataGenerator.createCommitFile(
+          tablePath, instantTime, HadoopFSUtils.getStorageConf(jsc.hadoopConfiguration()));
     }
 
     String savepoint = "102";
@@ -113,12 +116,14 @@ public class ITTestSavepointsCommand extends HoodieCLIIntegrationTestBase {
     // generate four commits
     for (int i = 100; i < 104; i++) {
       String instantTime = String.valueOf(i);
-      HoodieTestDataGenerator.createCommitFile(tablePath, instantTime, jsc.hadoopConfiguration());
+      HoodieTestDataGenerator.createCommitFile(
+          tablePath, instantTime, HadoopFSUtils.getStorageConf(jsc.hadoopConfiguration()));
     }
 
     // generate one savepoint
     String savepoint = "102";
-    HoodieTestDataGenerator.createSavepointFile(tablePath, savepoint, jsc.hadoopConfiguration());
+    HoodieTestDataGenerator.createSavepointFile(
+        tablePath, savepoint, HadoopFSUtils.getStorageConf(jsc.hadoopConfiguration()));
 
     result = shell.evaluate(() ->
             String.format("savepoint rollback --savepoint %s --sparkMaster %s", savepoint, "local"));
@@ -134,8 +139,8 @@ public class ITTestSavepointsCommand extends HoodieCLIIntegrationTestBase {
     assertEquals(1, timeline.getRestoreTimeline().countInstants());
 
     // 103 instant had rollback
-    assertFalse(timeline.getCommitTimeline().containsInstant(
-        new HoodieInstant(HoodieInstant.State.COMPLETED, "commit", "103")));
+    assertFalse(timeline.getCommitAndReplaceTimeline().containsInstant(
+        INSTANT_GENERATOR.createNewInstant(HoodieInstant.State.COMPLETED, "commit", "103")));
   }
 
   /**
@@ -146,21 +151,24 @@ public class ITTestSavepointsCommand extends HoodieCLIIntegrationTestBase {
     // generate for savepoints
     for (int i = 101; i < 105; i++) {
       String instantTime = String.valueOf(i);
-      HoodieTestDataGenerator.createCommitFile(tablePath, instantTime, jsc.hadoopConfiguration());
+      HoodieTestDataGenerator.createCommitFile(
+          tablePath, instantTime, HadoopFSUtils.getStorageConf(jsc.hadoopConfiguration()));
     }
 
     // generate one savepoint at 102
     String savepoint = "102";
-    HoodieTestDataGenerator.createSavepointFile(tablePath, savepoint, jsc.hadoopConfiguration());
+    HoodieTestDataGenerator.createSavepointFile(
+        tablePath, savepoint, HadoopFSUtils.getStorageConf(jsc.hadoopConfiguration()));
 
     // re-bootstrap metadata table
-    Path metadataTableBasePath = new Path(HoodieTableMetadata.getMetadataTableBasePath(HoodieCLI.basePath));
+    StoragePath metadataTableBasePath =
+        new StoragePath(HoodieTableMetadata.getMetadataTableBasePath(HoodieCLI.basePath));
     // then bootstrap metadata table at instant 104
     HoodieWriteConfig writeConfig = HoodieWriteConfig.newBuilder().withPath(HoodieCLI.basePath)
         .withMetadataConfig(HoodieMetadataConfig.newBuilder().enable(true).build()).build();
     SparkHoodieBackedTableMetadataWriter.create(HoodieCLI.conf, writeConfig, new HoodieSparkEngineContext(jsc)).close();
 
-    assertTrue(HoodieCLI.fs.exists(metadataTableBasePath));
+    assertTrue(HoodieCLI.storage.exists(metadataTableBasePath));
 
     // roll back to savepoint
     Object result = shell.evaluate(() ->
@@ -176,10 +184,10 @@ public class ITTestSavepointsCommand extends HoodieCLIIntegrationTestBase {
     assertEquals(1, timeline.getRestoreTimeline().countInstants());
 
     // 103 and 104 instant had rollback
-    assertFalse(timeline.getCommitTimeline().containsInstant(
-        new HoodieInstant(HoodieInstant.State.COMPLETED, "commit", "103")));
-    assertFalse(timeline.getCommitTimeline().containsInstant(
-        new HoodieInstant(HoodieInstant.State.COMPLETED, "commit", "104")));
+    assertFalse(timeline.getCommitAndReplaceTimeline().containsInstant(
+        INSTANT_GENERATOR.createNewInstant(HoodieInstant.State.COMPLETED, "commit", "103")));
+    assertFalse(timeline.getCommitAndReplaceTimeline().containsInstant(
+        INSTANT_GENERATOR.createNewInstant(HoodieInstant.State.COMPLETED, "commit", "104")));
   }
 
   /**
@@ -190,14 +198,17 @@ public class ITTestSavepointsCommand extends HoodieCLIIntegrationTestBase {
     // generate four savepoints
     for (int i = 100; i < 104; i++) {
       String instantTime = String.valueOf(i);
-      HoodieTestDataGenerator.createCommitFile(tablePath, instantTime, jsc.hadoopConfiguration());
+      HoodieTestDataGenerator.createCommitFile(
+          tablePath, instantTime, HadoopFSUtils.getStorageConf(jsc.hadoopConfiguration()));
     }
 
     // generate two savepoint
     String savepoint1 = "100";
     String savepoint2 = "102";
-    HoodieTestDataGenerator.createSavepointFile(tablePath, savepoint1, jsc.hadoopConfiguration());
-    HoodieTestDataGenerator.createSavepointFile(tablePath, savepoint2, jsc.hadoopConfiguration());
+    HoodieTestDataGenerator.createSavepointFile(
+        tablePath, savepoint1, HadoopFSUtils.getStorageConf(jsc.hadoopConfiguration()));
+    HoodieTestDataGenerator.createSavepointFile(
+        tablePath, savepoint2, HadoopFSUtils.getStorageConf(jsc.hadoopConfiguration()));
 
     HoodieActiveTimeline timeline = HoodieCLI.getTableMetaClient().getActiveTimeline();
     assertEquals(2, timeline.getSavePointTimeline().countInstants(), "There should 2 instants.");
@@ -215,6 +226,6 @@ public class ITTestSavepointsCommand extends HoodieCLIIntegrationTestBase {
     assertEquals(1, timeline.getSavePointTimeline().countInstants(), "There should 1 instants.");
 
     // after delete, 100 instant should not exist.
-    assertFalse(timeline.containsInstant(new HoodieInstant(false, HoodieTimeline.SAVEPOINT_ACTION, savepoint1)));
+    assertFalse(timeline.containsInstant(INSTANT_GENERATOR.createNewInstant(HoodieInstant.State.COMPLETED, HoodieTimeline.SAVEPOINT_ACTION, savepoint1)));
   }
 }

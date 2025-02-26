@@ -28,7 +28,6 @@ import org.apache.hudi.common.model.HoodieRecord;
 import org.apache.hudi.common.model.HoodieTableType;
 import org.apache.hudi.common.table.HoodieTableConfig;
 import org.apache.hudi.common.table.HoodieTableMetaClient;
-import org.apache.hudi.common.table.timeline.versioning.TimelineLayoutVersion;
 import org.apache.hudi.common.testutils.HoodieTestDataGenerator;
 import org.apache.hudi.config.HoodieWriteConfig;
 import org.apache.hudi.keygen.SimpleKeyGenerator;
@@ -46,6 +45,7 @@ import java.io.IOException;
 import java.util.List;
 
 import static org.apache.hudi.common.testutils.HoodieTestDataGenerator.TRIP_EXAMPLE_SCHEMA;
+import static org.apache.hudi.testutils.HoodieClientTestUtils.createMetaClient;
 import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
@@ -62,21 +62,20 @@ public class TestMetadataCommand extends CLIFunctionalTestHarness {
   public void init() throws IOException {
     tableName = tableName();
     tablePath = tablePath(tableName);
-    HoodieCLI.conf = hadoopConf();
+    HoodieCLI.conf = storageConf();
   }
 
   @Test
   public void testMetadataDelete() throws Exception {
-    HoodieTableMetaClient.withPropertyBuilder()
+    HoodieTableMetaClient.newTableBuilder()
         .setTableType(HoodieTableType.COPY_ON_WRITE.name())
         .setTableName(tableName())
-        .setArchiveLogFolder(HoodieTableConfig.ARCHIVELOG_FOLDER.defaultValue())
+        .setArchiveLogFolder(HoodieTableConfig.TIMELINE_HISTORY_PATH.defaultValue())
         .setPayloadClassName("org.apache.hudi.common.model.HoodieAvroPayload")
-        .setTimelineLayoutVersion(TimelineLayoutVersion.VERSION_1)
         .setPartitionFields("partition_path")
         .setRecordKeyFields("_row_key")
         .setKeyGeneratorClassProp(SimpleKeyGenerator.class.getCanonicalName())
-        .initTable(HoodieCLI.conf, tablePath);
+        .initTable(HoodieCLI.conf.newInstance(), tablePath);
 
     HoodieTestDataGenerator dataGen = new HoodieTestDataGenerator();
     HoodieWriteConfig config = HoodieWriteConfig.newBuilder().withPath(tablePath).withSchema(TRIP_EXAMPLE_SCHEMA).build();
@@ -93,10 +92,11 @@ public class TestMetadataCommand extends CLIFunctionalTestHarness {
     }
 
     // verify that metadata partitions are filled in as part of table config.
-    HoodieTableMetaClient metaClient = HoodieTableMetaClient.builder().setConf(hadoopConf()).setBasePath(tablePath).build();
+    HoodieTableMetaClient metaClient = createMetaClient(jsc(), tablePath);
     assertFalse(metaClient.getTableConfig().getMetadataPartitions().isEmpty());
 
-    new TableCommand().connect(tablePath, null, false, 0, 0, 0);
+    new TableCommand().connect(tablePath,  false, 0, 0, 0,
+        "WAIT_TO_ADJUST_SKEW", 200L, false);
     Object result = shell.evaluate(() -> "metadata delete");
     assertTrue(ShellEvaluationResultUtil.isSuccess(result));
 

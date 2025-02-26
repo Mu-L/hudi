@@ -27,15 +27,16 @@ import org.apache.hudi.client.common.HoodieSparkEngineContext;
 import org.apache.hudi.common.model.HoodieAvroPayload;
 import org.apache.hudi.common.model.HoodieRecord;
 import org.apache.hudi.common.model.HoodieTableType;
+import org.apache.hudi.common.table.HoodieTableVersion;
 import org.apache.hudi.common.table.timeline.HoodieActiveTimeline;
 import org.apache.hudi.common.table.timeline.HoodieInstant;
 import org.apache.hudi.common.table.timeline.HoodieTimeline;
-import org.apache.hudi.common.table.timeline.versioning.TimelineLayoutVersion;
 import org.apache.hudi.common.testutils.HoodieTestDataGenerator;
 import org.apache.hudi.common.util.Option;
 import org.apache.hudi.config.HoodieIndexConfig;
 import org.apache.hudi.config.HoodieWriteConfig;
 import org.apache.hudi.exception.HoodieException;
+import org.apache.hudi.hadoop.fs.HadoopFSUtils;
 import org.apache.hudi.index.HoodieIndex;
 import org.apache.hudi.storage.StoragePath;
 
@@ -76,9 +77,10 @@ public class ITTestTableCommand extends HoodieCLIIntegrationTestBase {
     // Create table and connect
     new TableCommand().createTable(
         tablePath, "test_table", HoodieTableType.COPY_ON_WRITE.name(),
-        "", TimelineLayoutVersion.VERSION_1, "org.apache.hudi.common.model.HoodieAvroPayload");
+        "", HoodieTableVersion.current().versionCode(), "org.apache.hudi.common.model.HoodieAvroPayload");
 
-    HoodieTestDataGenerator.createCommitFile(tablePath, "100", jsc.hadoopConfiguration());
+    HoodieTestDataGenerator.createCommitFile(
+        tablePath, "100", HadoopFSUtils.getStorageConf(jsc.hadoopConfiguration()));
 
     Object result = shell.evaluate(() -> "table change-table-type --target-type MOR");
 
@@ -93,7 +95,7 @@ public class ITTestTableCommand extends HoodieCLIIntegrationTestBase {
     // Create table and connect
     new TableCommand().createTable(
         tablePath, "test_table", HoodieTableType.MERGE_ON_READ.name(),
-        "", TimelineLayoutVersion.VERSION_1, "org.apache.hudi.common.model.HoodieAvroPayload");
+        "", HoodieTableVersion.current().versionCode(), "org.apache.hudi.common.model.HoodieAvroPayload");
 
     Object result = shell.evaluate(() -> "table change-table-type --target-type COW");
 
@@ -108,7 +110,7 @@ public class ITTestTableCommand extends HoodieCLIIntegrationTestBase {
     // Create table and connect
     new TableCommand().createTable(
         tablePath, "test_table", HoodieTableType.MERGE_ON_READ.name(),
-        "", TimelineLayoutVersion.VERSION_1, "org.apache.hudi.common.model.HoodieAvroPayload");
+        "", HoodieTableVersion.current().versionCode(), "org.apache.hudi.common.model.HoodieAvroPayload");
 
     generateCommits();
     // schedule a compaction
@@ -140,7 +142,7 @@ public class ITTestTableCommand extends HoodieCLIIntegrationTestBase {
     // Create table and connect
     new TableCommand().createTable(
         tablePath, "test_table", HoodieTableType.MERGE_ON_READ.name(),
-        "", TimelineLayoutVersion.VERSION_1, "org.apache.hudi.common.model.HoodieAvroPayload");
+        "", HoodieTableVersion.current().versionCode(), "org.apache.hudi.common.model.HoodieAvroPayload");
 
     generateCommits();
     Object result = shell.evaluate(() -> "table change-table-type --target-type COW");
@@ -165,7 +167,7 @@ public class ITTestTableCommand extends HoodieCLIIntegrationTestBase {
     // Create table and connect
     new TableCommand().createTable(
         tablePath, "test_table", HoodieTableType.MERGE_ON_READ.name(),
-        "", TimelineLayoutVersion.VERSION_1, "org.apache.hudi.common.model.HoodieAvroPayload");
+        "", HoodieTableVersion.current().versionCode(), "org.apache.hudi.common.model.HoodieAvroPayload");
 
     generateCommits();
     Object result = shell.evaluate(() -> "table change-table-type --target-type COW --enable-compaction false");

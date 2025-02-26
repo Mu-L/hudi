@@ -56,6 +56,9 @@ public abstract class HoodieRecord<T> implements HoodieRecordCompatibilityInterf
   public static final String FILENAME_METADATA_FIELD = HoodieMetadataField.FILENAME_METADATA_FIELD.getFieldName();
   public static final String OPERATION_METADATA_FIELD = HoodieMetadataField.OPERATION_METADATA_FIELD.getFieldName();
   public static final String HOODIE_IS_DELETED_FIELD = "_hoodie_is_deleted";
+  // If the ordering value is not set, this default order value is set and
+  // always treated as the commit time ordering.
+  public static final int DEFAULT_ORDERING_VALUE = 0;
 
   public enum HoodieMetadataField {
     COMMIT_TIME_METADATA_FIELD("_hoodie_commit_time"),
@@ -191,7 +194,8 @@ public abstract class HoodieRecord<T> implements HoodieRecordCompatibilityInterf
     this.ignoreIndexUpdate = record.ignoreIndexUpdate;
   }
 
-  public HoodieRecord() {}
+  public HoodieRecord() {
+  }
 
   public abstract HoodieRecord<T> newInstance();
 
@@ -296,12 +300,10 @@ public abstract class HoodieRecord<T> implements HoodieRecordCompatibilityInterf
 
   @Override
   public String toString() {
-    final StringBuilder sb = new StringBuilder("HoodieRecord{");
-    sb.append("key=").append(key);
-    sb.append(", currentLocation='").append(currentLocation).append('\'');
-    sb.append(", newLocation='").append(newLocation).append('\'');
-    sb.append('}');
-    return sb.toString();
+    return "HoodieRecord{" + "key=" + key
+        + ", currentLocation='" + currentLocation + '\''
+        + ", newLocation='" + newLocation + '\''
+        + '}';
   }
 
   public String getPartitionPath() {
@@ -451,10 +453,12 @@ public abstract class HoodieRecord<T> implements HoodieRecordCompatibilityInterf
    * org.apache.spark.sql.hudi.command.payload.ExpressionPayload
    */
   private static class EmptyRecord implements GenericRecord {
-    private EmptyRecord() {}
+    private EmptyRecord() {
+    }
 
     @Override
-    public void put(int i, Object v) {}
+    public void put(int i, Object v) {
+    }
 
     @Override
     public Object get(int i) {
@@ -467,7 +471,8 @@ public abstract class HoodieRecord<T> implements HoodieRecordCompatibilityInterf
     }
 
     @Override
-    public void put(String key, Object v) {}
+    public void put(String key, Object v) {
+    }
 
     @Override
     public Object get(String key) {
@@ -476,6 +481,6 @@ public abstract class HoodieRecord<T> implements HoodieRecordCompatibilityInterf
   }
 
   public enum HoodieRecordType {
-    AVRO, SPARK
+    AVRO, SPARK, HIVE
   }
 }

@@ -20,7 +20,7 @@
   <parent>
     <artifactId>hudi</artifactId>
     <groupId>org.apache.hudi</groupId>
-    <version>1.0.0-SNAPSHOT</version>
+    <version>1.1.0-SNAPSHOT</version>
   </parent>
   <modelVersion>4.0.0</modelVersion>
 
@@ -83,9 +83,9 @@
             <import>${basedir}/src/main/avro/HoodiePath.avsc</import>
             <import>${basedir}/src/main/avro/HoodieFSPermission.avsc</import>
             <import>${basedir}/src/main/avro/HoodieFileStatus.avsc</import>
-            <import>${basedir}/src/main/avro/HoodieBootstrapSourceFilePartitionInfo.avsc</import>
+            <import>${basedir}/src/main/avro/HoodieBootstrapFilePartitionInfo.avsc</import>
             <import>${basedir}/src/main/avro/HoodieBootstrapIndexInfo.avsc</import>
-            <import>${basedir}/src/main/avro/HoodieBootstrapMetadata.avsc</import>
+            <import>${basedir}/src/main/avro/HoodieBootstrapPartitionMetadata.avsc</import>
             <import>${basedir}/src/main/avro/HoodieSliceInfo.avsc</import>
             <import>${basedir}/src/main/avro/HoodieClusteringGroup.avsc</import>
             <import>${basedir}/src/main/avro/HoodieClusteringStrategy.avsc</import>
@@ -106,12 +106,6 @@
     <dependency>
       <groupId>org.apache.hudi</groupId>
       <artifactId>hudi-io</artifactId>
-      <version>${project.version}</version>
-    </dependency>
-
-    <dependency>
-      <groupId>org.apache.hudi</groupId>
-      <artifactId>hudi-hadoop-common</artifactId>
       <version>${project.version}</version>
     </dependency>
 
@@ -172,6 +166,12 @@
     <dependency>
       <groupId>org.apache.orc</groupId>
       <artifactId>orc-core</artifactId>
+      <exclusions>
+        <exclusion>
+          <groupId>org.apache.hadoop</groupId>
+          <artifactId>*</artifactId>
+        </exclusion>
+      </exclusions>
     </dependency>
 
     <!-- RoaringBitmap -->
@@ -193,24 +193,6 @@
     <dependency>
       <groupId>org.rocksdb</groupId>
       <artifactId>rocksdbjni</artifactId>
-    </dependency>
-
-    <!-- Hadoop -->
-    <dependency>
-      <groupId>org.apache.hadoop</groupId>
-      <artifactId>hadoop-client</artifactId>
-      <exclusions>
-        <exclusion>
-          <groupId>javax.servlet</groupId>
-          <artifactId>*</artifactId>
-        </exclusion>
-      </exclusions>
-      <scope>provided</scope>
-    </dependency>
-    <dependency>
-      <groupId>org.apache.hadoop</groupId>
-      <artifactId>hadoop-hdfs</artifactId>
-      <scope>provided</scope>
     </dependency>
 
     <dependency>
@@ -239,6 +221,16 @@
       <artifactId>system-rules</artifactId>
       <version>1.17.2</version>
       <scope>test</scope>
+    </dependency>
+
+    <dependency>
+      <groupId>org.eclipse.jetty</groupId>
+      <artifactId>jetty-server</artifactId>
+    </dependency>
+
+    <dependency>
+      <groupId>org.eclipse.jetty</groupId>
+      <artifactId>jetty-servlet</artifactId>
     </dependency>
 
     <!-- HBase -->
@@ -316,5 +308,52 @@
       <artifactId>disruptor</artifactId>
       <version>${disruptor.version}</version>
     </dependency>
+
+    <!-- Dropwizard Metrics -->
+    <dependency>
+          <groupId>io.dropwizard.metrics</groupId>
+          <artifactId>metrics-graphite</artifactId>
+          <exclusions>
+              <exclusion>
+                  <groupId>com.rabbitmq</groupId>
+                  <artifactId>*</artifactId>
+              </exclusion>
+          </exclusions>
+      </dependency>
+      <dependency>
+          <groupId>io.dropwizard.metrics</groupId>
+          <artifactId>metrics-core</artifactId>
+      </dependency>
+      <dependency>
+          <groupId>io.dropwizard.metrics</groupId>
+          <artifactId>metrics-jmx</artifactId>
+      </dependency>
+      <dependency>
+          <groupId>io.prometheus</groupId>
+          <artifactId>simpleclient</artifactId>
+      </dependency>
+      <dependency>
+          <groupId>io.prometheus</groupId>
+          <artifactId>simpleclient_httpserver</artifactId>
+      </dependency>
+      <dependency>
+          <groupId>io.prometheus</groupId>
+          <artifactId>simpleclient_dropwizard</artifactId>
+      </dependency>
+      <dependency>
+          <groupId>io.prometheus</groupId>
+          <artifactId>simpleclient_pushgateway</artifactId>
+      </dependency>
+    <dependency>
+      <groupId>com.uber.m3</groupId>
+      <artifactId>tally-m3</artifactId>
+      <version>${tally.version}</version>
+    </dependency>
+    <dependency>
+      <groupId>com.uber.m3</groupId>
+      <artifactId>tally-core</artifactId>
+      <version>${tally.version}</version>
+    </dependency>
+
   </dependencies>
 </project>

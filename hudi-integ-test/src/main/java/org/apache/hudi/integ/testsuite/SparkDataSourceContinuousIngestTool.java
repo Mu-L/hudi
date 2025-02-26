@@ -28,6 +28,7 @@ import org.apache.hudi.utilities.UtilHelpers;
 
 import com.beust.jcommander.JCommander;
 import com.beust.jcommander.Parameter;
+import org.apache.hadoop.conf.Configuration;
 import org.apache.hadoop.fs.Path;
 import org.apache.spark.api.java.JavaSparkContext;
 import org.apache.spark.sql.SparkSession;
@@ -43,6 +44,7 @@ import java.util.Map;
 /**
  * Sample command
  *
+ * TODO: [HUDI-8294]
  * ./bin/spark-submit --packages org.apache.spark:spark-avro_2.11:2.4.4 --driver-memory 4g   --executor-memory 4g \
  * --conf spark.serializer=org.apache.spark.serializer.KryoSerializer   --conf spark.sql.catalogImplementation=hive \
  * --class org.apache.hudi.integ.testsuite.SparkDSContinuousIngestTool \
@@ -106,7 +108,8 @@ public class SparkDataSourceContinuousIngestTool {
   public void run() {
     try {
       SparkDataSourceContinuousIngest sparkDataSourceContinuousIngest =
-          new SparkDataSourceContinuousIngest(sparkSession, context.getHadoopConf().get(), new Path(cfg.sourcePath), cfg.sparkFormat,
+          new SparkDataSourceContinuousIngest(
+              sparkSession, context.getStorageConf().unwrapAs(Configuration.class), new Path(cfg.sourcePath), cfg.sparkFormat,
               new Path(cfg.checkpointFilePath), new Path(cfg.basePath), getPropsAsMap(props),
               cfg.minSyncIntervalSeconds);
       sparkDataSourceContinuousIngest.startIngestion();

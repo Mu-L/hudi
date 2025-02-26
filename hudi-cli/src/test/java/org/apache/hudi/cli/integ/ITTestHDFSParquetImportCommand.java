@@ -24,7 +24,6 @@ import org.apache.hudi.cli.testutils.HoodieCLIIntegrationTestBase;
 import org.apache.hudi.cli.testutils.ShellEvaluationResultUtil;
 import org.apache.hudi.common.model.HoodieTableType;
 import org.apache.hudi.common.table.HoodieTableMetaClient;
-import org.apache.hudi.common.table.timeline.versioning.TimelineLayoutVersion;
 import org.apache.hudi.common.testutils.HoodieTestDataGenerator;
 import org.apache.hudi.storage.StoragePath;
 import org.apache.hudi.testutils.HoodieClientTestUtils;
@@ -80,10 +79,10 @@ public class ITTestHDFSParquetImportCommand extends HoodieCLIIntegrationTestBase
     tablePath = basePath + StoragePath.SEPARATOR + tableName;
     sourcePath = new Path(basePath, "source");
     targetPath = new Path(tablePath);
-    schemaFile = new Path(basePath, "file.schema").toString();
+    schemaFile = new StoragePath(basePath, "file.schema").toString();
 
     // create schema file
-    try (OutputStream schemaFileOS = fs.create(new Path(schemaFile))) {
+    try (OutputStream schemaFileOS = storage.create(new StoragePath(schemaFile))) {
       schemaFileOS.write(getUTF8Bytes(HoodieTestDataGenerator.TRIP_EXAMPLE_SCHEMA));
     }
 
@@ -113,7 +112,8 @@ public class ITTestHDFSParquetImportCommand extends HoodieCLIIntegrationTestBase
     assertTrue(Files.exists(Paths.get(metaPath)), "Hoodie table not exist.");
 
     // Load meta data
-    new TableCommand().connect(targetPath.toString(), TimelineLayoutVersion.VERSION_1, false, 2000, 300000, 7);
+    new TableCommand().connect(targetPath.toString(), false, 2000, 300000, 7,
+        "WAIT_TO_ADJUST_SKEW", 200L, false);
     metaClient = HoodieCLI.getTableMetaClient();
 
     assertEquals(1, metaClient.getActiveTimeline().getCommitsTimeline().countInstants(), "Should only 1 commit.");
@@ -137,7 +137,8 @@ public class ITTestHDFSParquetImportCommand extends HoodieCLIIntegrationTestBase
     dataImporter.dataImport(jsc, 0);
 
     // Load meta data
-    new TableCommand().connect(targetPath.toString(), TimelineLayoutVersion.VERSION_1, false, 2000, 300000, 7);
+    new TableCommand().connect(targetPath.toString(), false, 2000, 300000, 7,
+        "WAIT_TO_ADJUST_SKEW", 200L, false);
     metaClient = HoodieCLI.getTableMetaClient();
 
     // check if insert instant exist
@@ -169,17 +170,21 @@ public class ITTestHDFSParquetImportCommand extends HoodieCLIIntegrationTestBase
    * Method to verify result is equals to expect.
    */
   private void verifyResultData(List<GenericRecord> expectData) {
-    Dataset<Row> ds = HoodieClientTestUtils.read(jsc, tablePath, sqlContext, fs, tablePath + "/*/*/*/*");
+    Dataset<Row> ds = HoodieClientTestUtils.read(jsc, tablePath, sqlContext,
+        storage, tablePath + "/*/*/*/*");
 
-    List<Row> readData = ds.select("timestamp", "_row_key", "rider", "driver", "begin_lat", "begin_lon", "end_lat", "end_lon").collectAsList();
+    List<Row> readData =
+        ds.select("timestamp", "_row_key", "rider", "driver", "begin_lat", "begin_lon", "end_lat",
+            "end_lon").collectAsList();
     List<HoodieTripModel> result = readData.stream().map(row ->
-        new HoodieTripModel(row.getLong(0), row.getString(1), row.getString(2), row.getString(3), row.getDouble(4),
-            row.getDouble(5), row.getDouble(6), row.getDouble(7)))
+            new HoodieTripModel(row.getLong(0), row.getString(1), row.getString(2), row.getString(3),
+                row.getDouble(4),
+                row.getDouble(5), row.getDouble(6), row.getDouble(7)))
         .collect(Collectors.toList());
 
     List<HoodieTripModel> expected = expectData.stream().map(g ->
-        new HoodieTripModel(Long.parseLong(g.get("timestamp").toString()),
-            g.get("_row_key").toString(),
+            new HoodieTripModel(Long.parseLong(g.get("timestamp").toString()),
+                g.get("_row_key").toString(),
             g.get("rider").toString(),
             g.get("driver").toString(),
             Double.parseDouble(g.get("begin_lat").toString()),

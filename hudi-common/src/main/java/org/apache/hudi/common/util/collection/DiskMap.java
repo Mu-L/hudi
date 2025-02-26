@@ -37,7 +37,7 @@ import java.util.stream.Stream;
  * @param <T> The generic type of the keys
  * @param <R> The generic type of the values
  */
-public abstract class DiskMap<T extends Serializable, R extends Serializable> implements Map<T, R>, Iterable<R> {
+public abstract class DiskMap<T extends Serializable, R> implements Map<T, R>, KeyFilteringIterable<T, R>, AutoCloseable {
 
   private static final Logger LOG = LoggerFactory.getLogger(DiskMap.class);
   private static final String SUBFOLDER_PREFIX = "hudi";
@@ -49,7 +49,7 @@ public abstract class DiskMap<T extends Serializable, R extends Serializable> im
 
   public DiskMap(String basePath, String prefix) throws IOException {
     this.diskMapPath =
-        String.format("%s/%s-%s-%s", basePath, SUBFOLDER_PREFIX, prefix, UUID.randomUUID().toString());
+        String.format("%s/%s-%s-%s", basePath, SUBFOLDER_PREFIX, prefix, UUID.randomUUID());
     diskMapPathFile = new File(diskMapPath);
     FileIOUtils.deleteDirectory(diskMapPathFile);
     FileIOUtils.mkdir(diskMapPathFile);

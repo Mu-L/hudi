@@ -17,11 +17,12 @@
 
 package org.apache.spark.sql.parser
 
-import org.antlr.v4.runtime.ParserRuleContext
-import org.antlr.v4.runtime.tree.{ParseTree, RuleNode, TerminalNode}
 import org.apache.hudi.SparkAdapterSupport
 import org.apache.hudi.spark.sql.parser.HoodieSqlCommonBaseVisitor
 import org.apache.hudi.spark.sql.parser.HoodieSqlCommonParser._
+
+import org.antlr.v4.runtime.ParserRuleContext
+import org.antlr.v4.runtime.tree.{ParseTree, RuleNode, TerminalNode}
 import org.apache.spark.internal.Logging
 import org.apache.spark.sql.SparkSession
 import org.apache.spark.sql.catalyst.TableIdentifier
@@ -29,8 +30,8 @@ import org.apache.spark.sql.catalyst.analysis.UnresolvedRelation
 import org.apache.spark.sql.catalyst.expressions.{Expression, Literal}
 import org.apache.spark.sql.catalyst.parser.{ParserInterface, ParserUtils}
 import org.apache.spark.sql.catalyst.plans.logical._
+import org.apache.spark.sql.hudi.command.procedures.HoodieProcedures
 
-import java.util.Locale
 import scala.collection.JavaConverters._
 
 class HoodieSqlCommonAstBuilder(session: SparkSession, delegate: ParserInterface)
@@ -92,21 +93,28 @@ class HoodieSqlCommonAstBuilder(session: SparkSession, delegate: ParserInterface
   }
 
   override def visitCall(ctx: CallContext): LogicalPlan = withOrigin(ctx) {
-    if (ctx.callArgumentList() == null || ctx.callArgumentList().callArgument() == null || ctx.callArgumentList().callArgument().size() == 0) {
-      val name: Seq[String] = ctx.multipartIdentifier().parts.asScala.map(_.getText)
-      CallCommand(name, Seq())
+    val name: Seq[String] = ctx.multipartIdentifier().parts.asScala.map(_.getText).toSeq
+    val args: Seq[CallArgument] = if (ctx.callArgumentList() == null || ctx.callArgumentList().callArgument() == null || ctx.callArgumentList().callArgument().size() == 0) {
+      Seq()
     } else {
-      val name: Seq[String] = ctx.multipartIdentifier().parts.asScala.map(_.getText)
-      val args: Seq[CallArgument] = ctx.callArgumentList().callArgument().asScala.map(typedVisit[CallArgument])
-      CallCommand(name, args)
+      ctx.callArgumentList().callArgument().asScala.map(typedVisit[CallArgument]).toSeq
     }
+    if (isHudiCallCommand(name)) {
+      CallCommand(name, args)
+    } else {
+      null
+    }
+  }
+
+  def isHudiCallCommand(name: Seq[String]): Boolean = {
+    name.nonEmpty && HoodieProcedures.newBuilder(name.last) != null
   }
 
   /**
    * Return a multi-part identifier as Seq[String].
    */
   override def visitMultipartIdentifier(ctx: MultipartIdentifierContext): Seq[String] = withOrigin(ctx) {
-    ctx.parts.asScala.map(_.getText)
+    ctx.parts.asScala.map(_.getText).toSeq
   }
 
   /**

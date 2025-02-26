@@ -62,6 +62,7 @@ import java.util.TreeSet;
 import java.util.stream.Collectors;
 
 import static org.apache.hudi.common.testutils.HoodieTestTable.makeIncrementalCommitTimes;
+import static org.apache.hudi.common.testutils.HoodieTestUtils.INSTANT_GENERATOR;
 import static org.apache.hudi.table.TestCleaner.insertFirstBigBatchForClientCleanerTest;
 import static org.apache.hudi.testutils.Assertions.assertNoWriteErrors;
 import static org.apache.hudi.testutils.HoodieClientTestBase.wrapRecordsGenFunctionForPreppedCalls;
@@ -135,10 +136,10 @@ public class TestCleanerInsertAndCleanByVersions extends SparkClientFunctionalTe
     try (final SparkRDDWriteClient client = getHoodieWriteClient(cfg)) {
       final HoodieTestDataGenerator dataGen = new HoodieTestDataGenerator(System.nanoTime());
       final Function2<List<HoodieRecord>, String, Integer> recordInsertGenWrappedFunction = isPreppedAPI
-          ? wrapRecordsGenFunctionForPreppedCalls(basePath(), hadoopConf(), context(), cfg, dataGen::generateInserts)
+          ? wrapRecordsGenFunctionForPreppedCalls(basePath(), storageConf(), context(), cfg, dataGen::generateInserts)
           : dataGen::generateInserts;
       final Function2<List<HoodieRecord>, String, Integer> recordUpsertGenWrappedFunction = isPreppedAPI
-          ? wrapRecordsGenFunctionForPreppedCalls(basePath(), hadoopConf(), context(), cfg, dataGen::generateUniqueUpdates)
+          ? wrapRecordsGenFunctionForPreppedCalls(basePath(), storageConf(), context(), cfg, dataGen::generateUniqueUpdates)
           : dataGen::generateUniqueUpdates;
 
       HoodieTableMetaClient metaClient = getHoodieMetaClient(HoodieTableType.COPY_ON_WRITE);
@@ -167,7 +168,7 @@ public class TestCleanerInsertAndCleanByVersions extends SparkClientFunctionalTe
       List<String> instantTimes = makeIncrementalCommitTimes(9, 1, 10);
       String compactionTime = instantTimes.get(0);
       table.getActiveTimeline().saveToCompactionRequested(
-          new HoodieInstant(HoodieInstant.State.REQUESTED, HoodieTimeline.COMPACTION_ACTION, compactionTime),
+          INSTANT_GENERATOR.createNewInstant(HoodieInstant.State.REQUESTED, HoodieTimeline.COMPACTION_ACTION, compactionTime),
           TimelineMetadataUtils.serializeCompactionPlan(compactionPlan));
 
       instantTimes = instantTimes.subList(1, instantTimes.size());
@@ -192,7 +193,7 @@ public class TestCleanerInsertAndCleanByVersions extends SparkClientFunctionalTe
           HashMap<String, TreeSet<String>> fileIdToVersions = new HashMap<>();
           for (HoodieInstant entry : timeline.getInstants()) {
             HoodieCommitMetadata commitMetadata =
-                HoodieCommitMetadata.fromBytes(timeline.getInstantDetails(entry).get(), HoodieCommitMetadata.class);
+                metaClient.getCommitMetadataSerDe().deserialize(entry, timeline.getInstantDetails(entry).get(), HoodieCommitMetadata.class);
 
             for (HoodieWriteStat wstat : commitMetadata.getWriteStats(partitionPath)) {
               if (!fileIdToVersions.containsKey(wstat.getFileId())) {

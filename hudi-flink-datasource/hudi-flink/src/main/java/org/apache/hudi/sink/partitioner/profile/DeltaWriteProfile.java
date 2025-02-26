@@ -34,7 +34,7 @@ import java.util.List;
 import java.util.stream.Collectors;
 
 /**
- * WriteProfile for MERGE_ON_READ table type, this allows auto correction of small parquet files to larger ones
+ * DeltaWriteProfile for MERGE_ON_READ table type, this allows auto correction of small parquet files to larger ones
  * without the need for an index in the logFile.
  *
  * <p>Note: assumes the index can always index log files for Flink write.
@@ -59,7 +59,7 @@ public class DeltaWriteProfile extends WriteProfile {
       List<FileSlice> allSmallFileSlices = new ArrayList<>();
       // If we can index log files, we can add more inserts to log files for fileIds including those under
       // pending compaction.
-      List<FileSlice> allFileSlices = fsView.getLatestMergedFileSlicesBeforeOrOn(partitionPath, latestCommitTime.getTimestamp())
+      List<FileSlice> allFileSlices = fsView.getLatestMergedFileSlicesBeforeOrOn(partitionPath, latestCommitTime.requestedTime())
           .collect(Collectors.toList());
       for (FileSlice fileSlice : allFileSlices) {
         if (isSmallFile(fileSlice)) {

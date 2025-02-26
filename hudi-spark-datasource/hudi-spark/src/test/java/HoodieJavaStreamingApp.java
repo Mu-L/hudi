@@ -30,6 +30,8 @@ import org.apache.hudi.exception.TableNotFoundException;
 import org.apache.hudi.hive.HiveSyncConfig;
 import org.apache.hudi.hive.MultiPartKeysValueExtractor;
 import org.apache.hudi.hive.SlashEncodedDayPartitionValueExtractor;
+import org.apache.hudi.storage.hadoop.HadoopStorageConfiguration;
+import org.apache.hudi.testutils.HoodieClientTestUtils;
 
 import com.beust.jcommander.JCommander;
 import com.beust.jcommander.Parameter;
@@ -52,6 +54,7 @@ import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
 import java.util.concurrent.Future;
 
+import static org.apache.hudi.common.testutils.HoodieTestUtils.createMetaClient;
 import static org.apache.hudi.common.testutils.RawTripTestPayload.recordsToStrings;
 import static org.apache.hudi.hive.HiveSyncConfigHolder.HIVE_PASS;
 import static org.apache.hudi.hive.HiveSyncConfigHolder.HIVE_SYNC_ENABLED;
@@ -196,12 +199,12 @@ public class HoodieJavaStreamingApp {
       executor.shutdownNow();
     }
 
-    HoodieTableMetaClient metaClient = HoodieTableMetaClient.builder().setConf(jssc.hadoopConfiguration()).setBasePath(tablePath).build();
+    HoodieTableMetaClient metaClient = HoodieClientTestUtils.createMetaClient(jssc, tablePath);
     if (tableType.equals(HoodieTableType.MERGE_ON_READ.name())) {
       // Ensure we have successfully completed one compaction commit
-      ValidationUtils.checkArgument(metaClient.getActiveTimeline().getCommitTimeline().countInstants() == 1);
+      ValidationUtils.checkArgument(metaClient.getActiveTimeline().getCommitAndReplaceTimeline().countInstants() == 1);
     } else {
-      ValidationUtils.checkArgument(metaClient.getActiveTimeline().getCommitTimeline().countInstants() >= 1);
+      ValidationUtils.checkArgument(metaClient.getActiveTimeline().getCommitAndReplaceTimeline().countInstants() >= 1);
     }
 
     // Deletes Stream
@@ -261,7 +264,7 @@ public class HoodieJavaStreamingApp {
         if (timeline.countInstants() >= numCommits) {
           return;
         }
-        HoodieTableMetaClient metaClient = HoodieTableMetaClient.builder().setConf(fs.getConf()).setBasePath(tablePath).setLoadActiveTimelineOnLoad(true).build();
+        HoodieTableMetaClient metaClient = createMetaClient(new HadoopStorageConfiguration(fs.getConf()), tablePath);
         System.out.println("Instants :" + metaClient.getActiveTimeline().getInstants());
       } catch (TableNotFoundException te) {
         LOG.info("Got table not found exception. Retrying");
@@ -318,10 +321,7 @@ public class HoodieJavaStreamingApp {
     /**
      * Read & do some queries
      */
-    Dataset<Row> hoodieROViewDF = spark.read().format("hudi")
-        // pass any path glob, can include hoodie & non-hoodie
-        // datasets
-        .load(tablePath + "/*/*/*/*");
+    Dataset<Row> hoodieROViewDF = spark.read().format("hudi").load(tablePath);
     hoodieROViewDF.registerTempTable("hoodie_ro");
     spark.sql("describe hoodie_ro").show();
     // all trips whose fare amount was greater than 2.
@@ -347,7 +347,7 @@ public class HoodieJavaStreamingApp {
       Dataset<Row> hoodieIncViewDF = spark.read().format("hudi")
           .option(DataSourceReadOptions.QUERY_TYPE().key(), DataSourceReadOptions.QUERY_TYPE_INCREMENTAL_OPT_VAL())
           // Only changes in write 2 above
-          .option(DataSourceReadOptions.BEGIN_INSTANTTIME().key(), commitInstantTime1)
+          .option(DataSourceReadOptions.START_COMMIT().key(), commitInstantTime1)
           // For incremental view, pass in the root/base path of dataset
           .load(tablePath);
 

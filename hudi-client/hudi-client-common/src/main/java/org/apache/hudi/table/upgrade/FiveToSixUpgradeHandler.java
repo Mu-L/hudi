@@ -24,11 +24,12 @@ import org.apache.hudi.common.table.HoodieTableMetaClient;
 import org.apache.hudi.common.table.HoodieTableVersion;
 import org.apache.hudi.common.table.timeline.HoodieInstant;
 import org.apache.hudi.common.table.timeline.HoodieTimeline;
+import org.apache.hudi.common.table.timeline.InstantFileNameGenerator;
 import org.apache.hudi.config.HoodieWriteConfig;
 import org.apache.hudi.exception.HoodieUpgradeDowngradeException;
+import org.apache.hudi.storage.StoragePath;
 import org.apache.hudi.table.HoodieTable;
 
-import org.apache.hadoop.fs.Path;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
@@ -61,13 +62,15 @@ public class FiveToSixUpgradeHandler implements UpgradeHandler {
     HoodieTableMetaClient metaClient = table.getMetaClient();
     HoodieTimeline compactionTimeline = metaClient.getActiveTimeline().filterPendingCompactionTimeline()
         .filter(instant -> instant.getState() == HoodieInstant.State.REQUESTED);
+    InstantFileNameGenerator factory = table.getMetaClient().getInstantFileNameGenerator();
+
     compactionTimeline.getInstantsAsStream().forEach(
         deleteInstant -> {
           LOG.info("Deleting instant " + deleteInstant + " in auxiliary meta path " + metaClient.getMetaAuxiliaryPath());
-          Path metaFile = new Path(metaClient.getMetaAuxiliaryPath(), deleteInstant.getFileName());
+          StoragePath metaFile = new StoragePath(metaClient.getMetaAuxiliaryPath(), factory.getFileName(deleteInstant));
           try {
-            if (metaClient.getFs().exists(metaFile)) {
-              metaClient.getFs().delete(metaFile, false);
+            if (metaClient.getStorage().exists(metaFile)) {
+              metaClient.getStorage().deleteFile(metaFile);
               LOG.info("Deleted instant file in auxiliary meta path : " + metaFile);
             }
           } catch (IOException e) {

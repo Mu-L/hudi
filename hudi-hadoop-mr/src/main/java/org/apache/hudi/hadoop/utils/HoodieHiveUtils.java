@@ -28,7 +28,6 @@ import org.apache.hadoop.fs.Path;
 import org.apache.hadoop.io.Writable;
 import org.apache.hadoop.mapred.JobConf;
 import org.apache.hadoop.mapreduce.JobContext;
-
 import org.apache.hive.common.util.HiveVersionInfo;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
@@ -140,7 +139,7 @@ public class HoodieHiveUtils {
     Map<String, String> tablesModeMap = job.getConfiguration()
         .getValByRegex(HOODIE_CONSUME_MODE_PATTERN_STRING.pattern());
     List<String> result = tablesModeMap.entrySet().stream().map(s -> {
-      if (s.getValue().trim().toUpperCase().equals(INCREMENTAL_SCAN_MODE)) {
+      if (s.getValue().trim().equalsIgnoreCase(INCREMENTAL_SCAN_MODE)) {
         Matcher matcher = HOODIE_CONSUME_MODE_PATTERN_STRING.matcher(s.getKey());
         return (!matcher.find() ? null : matcher.group(1));
       }
@@ -187,7 +186,7 @@ public class HoodieHiveUtils {
     return HIVE_SHIM.getDays(dateWritable);
   }
 
-  public static long getMills(Object timestamp) {
-    return HIVE_SHIM.getMills(timestamp);
+  public static long getMills(Object timestampWritable) {
+    return HIVE_SHIM.getMills(timestampWritable);
   }
 }

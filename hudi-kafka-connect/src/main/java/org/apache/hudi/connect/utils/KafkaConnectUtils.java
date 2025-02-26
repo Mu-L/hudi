@@ -32,10 +32,11 @@ import org.apache.hudi.common.util.StringUtils;
 import org.apache.hudi.connect.ControlMessage;
 import org.apache.hudi.connect.writers.KafkaConnectConfigs;
 import org.apache.hudi.exception.HoodieException;
+import org.apache.hudi.hadoop.fs.HadoopFSUtils;
 import org.apache.hudi.keygen.BaseKeyGenerator;
-import org.apache.hudi.keygen.CustomAvroKeyGenerator;
 import org.apache.hudi.keygen.KeyGenerator;
 import org.apache.hudi.keygen.constant.KeyGeneratorOptions;
+import org.apache.hudi.storage.StorageConfiguration;
 
 import com.google.protobuf.ByteString;
 import org.apache.hadoop.conf.Configuration;
@@ -54,7 +55,7 @@ import java.nio.file.Paths;
 import java.security.MessageDigest;
 import java.security.NoSuchAlgorithmException;
 import java.util.ArrayList;
-import java.util.Arrays;
+import java.util.Collections;
 import java.util.List;
 import java.util.Map;
 import java.util.Objects;
@@ -122,7 +123,7 @@ public class KafkaConnectUtils {
     props.put("bootstrap.servers", bootstrapServers);
     try {
       AdminClient client = AdminClient.create(props);
-      DescribeTopicsResult result = client.describeTopics(Arrays.asList(topicName));
+      DescribeTopicsResult result = client.describeTopics(Collections.singletonList(topicName));
       Map<String, KafkaFuture<TopicDescription>> values = result.values();
       KafkaFuture<TopicDescription> topicDescription = values.get(topicName);
       int numPartitions = topicDescription.get().partitions().size();
@@ -134,11 +135,9 @@ public class KafkaConnectUtils {
   }
 
   /**
-   * Returns the default Hadoop Configuration.
-   *
-   * @return
+   * @return the default storage configuration.
    */
-  public static Configuration getDefaultHadoopConf(KafkaConnectConfigs connectConfigs) {
+  public static StorageConfiguration<Configuration> getDefaultStorageConf(KafkaConnectConfigs connectConfigs) {
     Configuration hadoopConf = new Configuration();
 
     // add hadoop config files
@@ -164,7 +163,7 @@ public class KafkaConnectUtils {
     }).forEach(prop -> {
       hadoopConf.set(prop.toString(), connectConfigs.getProps().get(prop.toString()).toString());
     });
-    return hadoopConf;
+    return HadoopFSUtils.getStorageConf(hadoopConf);
   }
 
   /**
@@ -185,14 +184,7 @@ public class KafkaConnectUtils {
    * @param typedProperties properties from the config.
    * @return partition columns Returns the partition columns separated by comma.
    */
-  public static String getPartitionColumns(KeyGenerator keyGenerator, TypedProperties typedProperties) {
-    if (keyGenerator instanceof CustomAvroKeyGenerator) {
-      return ((BaseKeyGenerator) keyGenerator).getPartitionPathFields().stream().map(
-          pathField -> Arrays.stream(pathField.split(CustomAvroKeyGenerator.SPLIT_REGEX))
-              .findFirst().orElseGet(() -> "Illegal partition path field format: '$pathField' for ${c.getClass.getSimpleName}"))
-          .collect(Collectors.joining(","));
-    }
-
+  public static String getPartitionColumnsForKeyGenerator(KeyGenerator keyGenerator, TypedProperties typedProperties) {
     if (keyGenerator instanceof BaseKeyGenerator) {
       return String.join(",", ((BaseKeyGenerator) keyGenerator).getPartitionPathFields());
     }
@@ -216,7 +208,7 @@ public class KafkaConnectUtils {
     if (latestInstant.isPresent()) {
       try {
         byte[] data = timeline.getInstantDetails(latestInstant.get()).get();
-        return Option.of(HoodieCommitMetadata.fromBytes(data, HoodieCommitMetadata.class));
+        return Option.of(metaClient.getCommitMetadataSerDe().deserialize(latestInstant.get(), data, HoodieCommitMetadata.class));
       } catch (Exception e) {
         throw new HoodieException("Failed to read schema from commit metadata", e);
       }

@@ -22,6 +22,7 @@ import org.apache.hudi.common.util.BinaryUtil;
 import org.apache.hudi.common.util.CollectionUtils;
 import org.apache.hudi.config.HoodieClusteringConfig;
 import org.apache.hudi.optimize.HilbertCurveUtils;
+import org.apache.hudi.util.JavaScalaConverters;
 
 import org.apache.spark.api.java.JavaRDD;
 import org.apache.spark.sql.Column;
@@ -55,14 +56,12 @@ import org.slf4j.LoggerFactory;
 import javax.annotation.Nonnull;
 
 import java.util.Arrays;
+import java.util.Collections;
 import java.util.Iterator;
 import java.util.List;
 import java.util.Map;
 import java.util.function.Function;
 import java.util.stream.Collectors;
-
-import scala.collection.JavaConversions;
-import scala.collection.mutable.WrappedArray;
 
 public class SpaceCurveSortingHelper {
 
@@ -145,7 +144,7 @@ public class SpaceCurveSortingHelper {
     return StructType$.MODULE$.apply(
         CollectionUtils.combine(
             Arrays.asList(schema.fields()),
-            Arrays.asList(new StructField("Index", BinaryType$.MODULE$, true, Metadata.empty()))
+            Collections.singletonList(new StructField("Index", BinaryType$.MODULE$, true, Metadata.empty()))
         )
     );
   }
@@ -153,12 +152,13 @@ public class SpaceCurveSortingHelper {
   private static JavaRDD<Row> createZCurveSortedRDD(JavaRDD<Row> originRDD, Map<Integer, StructField> fieldMap, int fieldNum, int fileNum) {
     return originRDD.map(row -> {
       byte[][] zBytes = fieldMap.entrySet().stream()
-        .map(entry -> {
-          int index = entry.getKey();
-          StructField field = entry.getValue();
-          return mapColumnValueTo8Bytes(row, index, field.dataType());
-        })
-        .toArray(byte[][]::new);
+          .map(entry -> {
+            int index = entry.getKey();
+
+            StructField field = entry.getValue();
+            return mapColumnValueTo8Bytes(row, index, field.dataType());
+          })
+          .toArray(byte[][]::new);
 
       // Interleave received bytes to produce Z-curve ordinal
       byte[] zOrdinalBytes = BinaryUtil.interleaving(zBytes, 8);
@@ -200,9 +200,7 @@ public class SpaceCurveSortingHelper {
   }
 
   private static Row appendToRow(Row row, Object value) {
-    // NOTE: This is an ugly hack to avoid array re-allocation --
-    //       Spark's {@code Row#toSeq} returns array of Objects
-    Object[] currentValues = (Object[]) ((WrappedArray<Object>) row.toSeq()).array();
+    Object[] currentValues = JavaScalaConverters.convertScalaListToJavaList(row.toSeq()).toArray();
     return RowFactory.create(CollectionUtils.append(currentValues, value));
   }
 
@@ -229,7 +227,7 @@ public class SpaceCurveSortingHelper {
     } else if (dataType instanceof DecimalType) {
       return BinaryUtil.longTo8Byte(row.isNullAt(index) ? Long.MAX_VALUE : row.getDecimal(index).longValue());
     } else if (dataType instanceof BooleanType) {
-      boolean value = row.isNullAt(index) ? false : row.getBoolean(index);
+      boolean value = !row.isNullAt(index) && row.getBoolean(index);
       return BinaryUtil.intTo8Byte(value ? 1 : 0);
     } else if (dataType instanceof BinaryType) {
       return BinaryUtil.paddingTo8Byte(row.isNullAt(index) ? new byte[] {0} : (byte[]) row.get(index));
@@ -246,7 +244,7 @@ public class SpaceCurveSortingHelper {
     } else if (dataType instanceof IntegerType) {
       return row.isNullAt(index) ? Long.MAX_VALUE : (long) row.getInt(index);
     } else if (dataType instanceof FloatType) {
-      return row.isNullAt(index) ? Long.MAX_VALUE : Double.doubleToLongBits((double) row.getFloat(index));
+      return row.isNullAt(index) ? Long.MAX_VALUE : Double.doubleToLongBits(row.getFloat(index));
     } else if (dataType instanceof StringType) {
       return row.isNullAt(index) ? Long.MAX_VALUE : BinaryUtil.convertStringToLong(row.getString(index));
     } else if (dataType instanceof DateType) {
@@ -260,7 +258,7 @@ public class SpaceCurveSortingHelper {
     } else if (dataType instanceof DecimalType) {
       return row.isNullAt(index) ? Long.MAX_VALUE : row.getDecimal(index).longValue();
     } else if (dataType instanceof BooleanType) {
-      boolean value = row.isNullAt(index) ? false : row.getBoolean(index);
+      boolean value = !row.isNullAt(index) && row.getBoolean(index);
       return value ? Long.MAX_VALUE : 0;
     } else if (dataType instanceof BinaryType) {
       return row.isNullAt(index) ? Long.MAX_VALUE : BinaryUtil.convertBytesToLong((byte[]) row.get(index));
@@ -275,6 +273,6 @@ public class SpaceCurveSortingHelper {
       List<String> orderByCols,
       int targetPartitionCount
   ) {
-    return RangeSampleSort$.MODULE$.sortDataFrameBySample(df, layoutOptStrategy, JavaConversions.asScalaBuffer(orderByCols), targetPartitionCount);
+    return RangeSampleSort$.MODULE$.sortDataFrameBySample(df, layoutOptStrategy, JavaScalaConverters.convertJavaListToScalaList(orderByCols), targetPartitionCount);
   }
 }

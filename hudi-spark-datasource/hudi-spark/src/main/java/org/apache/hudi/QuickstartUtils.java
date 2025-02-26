@@ -18,9 +18,6 @@
 
 package org.apache.hudi;
 
-import org.apache.avro.Schema;
-import org.apache.avro.generic.GenericData;
-import org.apache.avro.generic.GenericRecord;
 import org.apache.hudi.common.model.HoodieAvroRecord;
 import org.apache.hudi.common.model.HoodieKey;
 import org.apache.hudi.common.model.HoodieRecord;
@@ -28,6 +25,10 @@ import org.apache.hudi.common.model.OverwriteWithLatestAvroPayload;
 import org.apache.hudi.common.util.Option;
 import org.apache.hudi.exception.HoodieException;
 import org.apache.hudi.exception.HoodieIOException;
+
+import org.apache.avro.Schema;
+import org.apache.avro.generic.GenericData;
+import org.apache.avro.generic.GenericRecord;
 import org.apache.spark.sql.Row;
 
 import java.io.IOException;
@@ -64,7 +65,7 @@ public class QuickstartUtils {
         + "{\"name\":\"fare\",\"type\": \"double\"}]}";
     static Schema avroSchema = new Schema.Parser().parse(TRIP_EXAMPLE_SCHEMA);
 
-    private static Random rand = new Random(46474747);
+    private static final Random RAND = new Random(46474747);
 
     private final Map<Integer, HoodieKey> existingKeys;
     private final String[] partitionPaths;
@@ -89,7 +90,7 @@ public class QuickstartUtils {
       int stringLength = 3;
       StringBuilder buffer = new StringBuilder(stringLength);
       for (int i = 0; i < stringLength; i++) {
-        int randomLimitedInt = leftLimit + (int) (rand.nextFloat() * (rightLimit - leftLimit + 1));
+        int randomLimitedInt = leftLimit + (int) (RAND.nextFloat() * (rightLimit - leftLimit + 1));
         buffer.append((char) randomLimitedInt);
       }
       return buffer.toString();
@@ -106,11 +107,11 @@ public class QuickstartUtils {
       rec.put("ts", timestamp);
       rec.put("rider", riderName);
       rec.put("driver", driverName);
-      rec.put("begin_lat", rand.nextDouble());
-      rec.put("begin_lon", rand.nextDouble());
-      rec.put("end_lat", rand.nextDouble());
-      rec.put("end_lon", rand.nextDouble());
-      rec.put("fare", rand.nextDouble() * 100);
+      rec.put("begin_lat", RAND.nextDouble());
+      rec.put("begin_lon", RAND.nextDouble());
+      rec.put("end_lat", RAND.nextDouble());
+      rec.put("end_lon", RAND.nextDouble());
+      rec.put("fare", RAND.nextDouble() * 100);
       return rec;
     }
 
@@ -145,7 +146,7 @@ public class QuickstartUtils {
       int currSize = getNumExistingKeys();
 
       return IntStream.range(0, n).boxed().map(i -> {
-        String partitionPath = partitionPaths[rand.nextInt(partitionPaths.length)];
+        String partitionPath = partitionPaths[RAND.nextInt(partitionPaths.length)];
         HoodieKey key = new HoodieKey(UUID.randomUUID().toString(), partitionPath);
         existingKeys.put(currSize + i, key);
         numExistingKeys++;
@@ -183,7 +184,7 @@ public class QuickstartUtils {
       String randomString = generateRandomString();
       return IntStream.range(0, n).boxed().map(x -> {
         try {
-          return generateUpdateRecord(existingKeys.get(rand.nextInt(numExistingKeys)), randomString);
+          return generateUpdateRecord(existingKeys.get(RAND.nextInt(numExistingKeys)), randomString);
         } catch (IOException e) {
           throw new HoodieIOException(e.getMessage(), e);
         }
@@ -248,13 +249,12 @@ public class QuickstartUtils {
   }
 
   private static Option<String> convertToString(String uuid, String partitionPath, Long ts) {
-    StringBuffer stringBuffer = new StringBuffer();
-    stringBuffer.append("{");
-    stringBuffer.append("\"ts\": \"" + (ts == null ? "0.0" : ts) + "\",");
-    stringBuffer.append("\"uuid\": \"" + uuid + "\",");
-    stringBuffer.append("\"partitionpath\": \"" + partitionPath + "\"");
-    stringBuffer.append("}");
-    return Option.of(stringBuffer.toString());
+    String stringBuffer = "{"
+        + "\"ts\": \"" + (ts == null ? "0.0" : ts) + "\","
+        + "\"uuid\": \"" + uuid + "\","
+        + "\"partitionpath\": \"" + partitionPath + "\""
+        + "}";
+    return Option.of(stringBuffer);
   }
 
   public static List<String> convertToStringList(List<HoodieRecord> records) {

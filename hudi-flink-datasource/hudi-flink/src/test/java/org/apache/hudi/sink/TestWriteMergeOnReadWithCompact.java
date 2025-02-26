@@ -19,6 +19,7 @@
 package org.apache.hudi.sink;
 
 import org.apache.hudi.client.HoodieFlinkWriteClient;
+import org.apache.hudi.common.config.HoodieMetadataConfig;
 import org.apache.hudi.common.model.HoodieTableType;
 import org.apache.hudi.common.model.PartialUpdateAvroPayload;
 import org.apache.hudi.common.model.WriteConcurrencyMode;
@@ -29,6 +30,7 @@ import org.apache.hudi.exception.HoodieWriteConflictException;
 import org.apache.hudi.index.HoodieIndex;
 import org.apache.hudi.util.FlinkWriteClients;
 import org.apache.hudi.utils.TestData;
+import org.apache.hudi.utils.TestUtils;
 
 import org.apache.flink.configuration.Configuration;
 import org.apache.flink.table.data.RowData;
@@ -95,6 +97,7 @@ public class TestWriteMergeOnReadWithCompact extends TestWriteCopyOnWrite {
     // disable schedule compaction in writers
     conf.setBoolean(FlinkOptions.COMPACTION_SCHEDULE_ENABLED, false);
     conf.setBoolean(FlinkOptions.PRE_COMBINE, true);
+    conf.setString(HoodieMetadataConfig.ENABLE_METADATA_INDEX_PARTITION_STATS.key(), "false"); // HUDI-8814
 
     // start pipeline1 and insert record: [id1,Danny,null,1,par1], suspend the tx commit
     List<RowData> dataset1 = Collections.singletonList(
@@ -134,7 +137,7 @@ public class TestWriteMergeOnReadWithCompact extends TestWriteCopyOnWrite {
     pipeline1.assertEmptyDataFiles();
 
     // schedule compaction outside all writers
-    try (HoodieFlinkWriteClient writeClient = FlinkWriteClients.createWriteClient(conf)) {
+    try (HoodieFlinkWriteClient writeClient = FlinkWriteClients.createWriteClient(conf, TestUtils.getMockRuntimeContext())) {
       Option<String> scheduleInstant = writeClient.scheduleCompaction(Option.empty());
       assertNotNull(scheduleInstant.get());
     }
@@ -202,7 +205,7 @@ public class TestWriteMergeOnReadWithCompact extends TestWriteCopyOnWrite {
         .assertNextEvent();
 
     // schedule compaction outside all writers
-    try (HoodieFlinkWriteClient writeClient = FlinkWriteClients.createWriteClient(conf)) {
+    try (HoodieFlinkWriteClient writeClient = FlinkWriteClients.createWriteClient(conf, TestUtils.getMockRuntimeContext())) {
       Option<String> scheduleInstant = writeClient.scheduleCompaction(Option.empty());
       assertNotNull(scheduleInstant.get());
     }
@@ -289,6 +292,7 @@ public class TestWriteMergeOnReadWithCompact extends TestWriteCopyOnWrite {
     // disable schedule compaction in writers
     conf.setBoolean(FlinkOptions.COMPACTION_SCHEDULE_ENABLED, false);
     conf.setBoolean(FlinkOptions.PRE_COMBINE, true);
+    conf.setString(HoodieMetadataConfig.ENABLE_METADATA_INDEX_PARTITION_STATS.key(), "false");
 
     Configuration conf1 = conf.clone();
     conf1.setString(FlinkOptions.OPERATION, "BULK_INSERT");
@@ -323,7 +327,7 @@ public class TestWriteMergeOnReadWithCompact extends TestWriteCopyOnWrite {
     pipeline2.checkWrittenData(tmpSnapshotResult, 1);
 
     // schedule compaction outside all writers
-    try (HoodieFlinkWriteClient writeClient = FlinkWriteClients.createWriteClient(conf)) {
+    try (HoodieFlinkWriteClient writeClient = FlinkWriteClients.createWriteClient(conf, TestUtils.getMockRuntimeContext())) {
       Option<String> scheduleInstant = writeClient.scheduleCompaction(Option.empty());
       assertNotNull(scheduleInstant.get());
     }

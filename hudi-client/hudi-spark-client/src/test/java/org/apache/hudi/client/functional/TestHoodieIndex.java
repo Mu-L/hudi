@@ -30,7 +30,6 @@ import org.apache.hudi.common.model.HoodieTableType;
 import org.apache.hudi.common.model.WriteOperationType;
 import org.apache.hudi.common.table.HoodieTableConfig;
 import org.apache.hudi.common.table.HoodieTableMetaClient;
-import org.apache.hudi.common.table.timeline.HoodieDefaultTimeline;
 import org.apache.hudi.common.table.timeline.HoodieInstant;
 import org.apache.hudi.common.table.timeline.HoodieInstantTimeGenerator;
 import org.apache.hudi.common.table.timeline.HoodieTimeline;
@@ -50,13 +49,13 @@ import org.apache.hudi.index.HoodieIndexUtils;
 import org.apache.hudi.keygen.KeyGenerator;
 import org.apache.hudi.keygen.RawTripTestPayloadKeyGenerator;
 import org.apache.hudi.metadata.HoodieTableMetadata;
+import org.apache.hudi.storage.StoragePath;
 import org.apache.hudi.table.HoodieSparkTable;
 import org.apache.hudi.table.HoodieTable;
 import org.apache.hudi.table.action.commit.SparkBucketIndexPartitioner;
 import org.apache.hudi.testutils.HoodieSparkWriteableTestTable;
 import org.apache.hudi.testutils.MetadataMergeWriteStatus;
 
-import org.apache.hadoop.fs.Path;
 import org.apache.spark.api.java.JavaPairRDD;
 import org.apache.spark.api.java.JavaRDD;
 import org.junit.jupiter.api.AfterEach;
@@ -82,6 +81,8 @@ import java.util.stream.Stream;
 import scala.Tuple2;
 
 import static org.apache.hudi.avro.HoodieAvroUtils.addMetadataFields;
+import static org.apache.hudi.common.testutils.HoodieTestUtils.INSTANT_GENERATOR;
+import static org.apache.hudi.common.testutils.HoodieTestUtils.TIMELINE_FACTORY;
 import static org.apache.hudi.metadata.HoodieTableMetadataUtil.deleteMetadataPartition;
 import static org.apache.hudi.metadata.HoodieTableMetadataUtil.metadataPartitionExists;
 import static org.apache.hudi.metadata.MetadataPartitionType.COLUMN_STATS;
@@ -122,10 +123,10 @@ public class TestHoodieIndex extends TestHoodieMetadataBase {
   private void setUp(IndexType indexType, boolean populateMetaFields, boolean enableMetadataIndex, boolean rollbackUsingMarkers) throws Exception {
     initPath();
     initSparkContexts();
-    initFileSystem();
+    initHoodieStorage();
 
     Properties keyGenProps = getPropsForKeyGen(indexType, populateMetaFields);
-    metaClient = HoodieTestUtils.init(hadoopConf, basePath, HoodieTableType.COPY_ON_WRITE, keyGenProps);
+    metaClient = HoodieTestUtils.init(storageConf, basePath, HoodieTableType.COPY_ON_WRITE, keyGenProps);
     HoodieIndexConfig.Builder indexBuilder = HoodieIndexConfig.newBuilder().withIndexType(indexType)
         .fromProperties(keyGenProps)
         .withIndexType(indexType);
@@ -329,11 +330,11 @@ public class TestHoodieIndex extends TestHoodieMetadataBase {
 
     // check column_stats partition exists
     metaClient = HoodieTableMetaClient.reload(metaClient);
-    assertTrue(metadataPartitionExists(metaClient.getBasePath(), context, COLUMN_STATS));
+    assertTrue(metadataPartitionExists(metaClient.getBasePath(), context, COLUMN_STATS.getPartitionPath()));
     assertTrue(metaClient.getTableConfig().getMetadataPartitions().contains(COLUMN_STATS.getPartitionPath()));
 
     // delete the column_stats partition
-    deleteMetadataPartition(metaClient.getBasePath(), context, COLUMN_STATS);
+    deleteMetadataPartition(metaClient.getBasePath(), context, COLUMN_STATS.getPartitionPath());
 
     // Now tagLocation for these records, they should be tagged correctly despite column_stats being enabled but not present
     hoodieTable = HoodieSparkTable.create(config, context, metaClient);
@@ -376,7 +377,8 @@ public class TestHoodieIndex extends TestHoodieMetadataBase {
     // We are trying to approximately imitate the case when the RDD is recomputed. For RDD creating, driver code is not
     // recomputed. This includes the state transitions. We need to delete the inflight instance so that subsequent
     // upsert will not run into conflicts.
-    metaClient.getFs().delete(new Path(metaClient.getMetaPath(), newCommitTime + ".inflight"));
+    metaClient.getStorage().deleteDirectory(
+        new StoragePath(metaClient.getTimelinePath(), newCommitTime + ".inflight"));
 
     writeClient.upsert(writeRecords, newCommitTime);
     assertNoWriteErrors(writeStatues.collect());
@@ -458,23 +460,28 @@ public class TestHoodieIndex extends TestHoodieMetadataBase {
     final String fileId3 = "fileID3";
 
     Map<String, List<Pair<String, Integer>>> partitionToFilesNameLengthMap = new HashMap<>();
-    Path baseFilePath = testTable.forCommit("0000001").withInserts(p1, fileId1, Collections.singletonList(record1));
-    long baseFileLength = fs.getFileStatus(baseFilePath).getLen();
+    StoragePath baseFilePath =
+        testTable.forCommit("0000001").withInserts(p1, fileId1, Collections.singletonList(record1));
+    long baseFileLength = storage.getPathInfo(baseFilePath).getLength();
     partitionToFilesNameLengthMap.computeIfAbsent(p1, k -> new ArrayList<>()).add(Pair.of(fileId1, Integer.valueOf((int) baseFileLength)));
     testTable.doWriteOperation("0000001", WriteOperationType.UPSERT, Arrays.asList(p1, p2),
         partitionToFilesNameLengthMap, false, false);
 
     partitionToFilesNameLengthMap.clear();
-    baseFilePath = testTable.forCommit("0000002").withInserts(p1, fileId2, Collections.singletonList(record2));
-    baseFileLength = fs.getFileStatus(baseFilePath).getLen();
-    partitionToFilesNameLengthMap.computeIfAbsent(p1, k -> new ArrayList<>()).add(Pair.of(fileId2, Integer.valueOf((int) baseFileLength)));
+    baseFilePath =
+        testTable.forCommit("0000002").withInserts(p1, fileId2, Collections.singletonList(record2));
+    baseFileLength = storage.getPathInfo(baseFilePath).getLength();
+    partitionToFilesNameLengthMap.computeIfAbsent(p1, k -> new ArrayList<>())
+        .add(Pair.of(fileId2, Integer.valueOf((int) baseFileLength)));
     testTable.doWriteOperation("0000002", WriteOperationType.UPSERT, Arrays.asList(p1, p2),
         partitionToFilesNameLengthMap, false, false);
 
     partitionToFilesNameLengthMap.clear();
-    baseFilePath = testTable.forCommit("0000003").withInserts(p2, fileId3, Collections.singletonList(record4));
-    baseFileLength = fs.getFileStatus(baseFilePath).getLen();
-    partitionToFilesNameLengthMap.computeIfAbsent(p2, k -> new ArrayList<>()).add(Pair.of(fileId3, Integer.valueOf((int) baseFileLength)));
+    baseFilePath =
+        testTable.forCommit("0000003").withInserts(p2, fileId3, Collections.singletonList(record4));
+    baseFileLength = storage.getPathInfo(baseFilePath).getLength();
+    partitionToFilesNameLengthMap.computeIfAbsent(p2, k -> new ArrayList<>())
+        .add(Pair.of(fileId3, Integer.valueOf((int) baseFileLength)));
     testTable.doWriteOperation("0000003", WriteOperationType.UPSERT, Arrays.asList(p1, p2),
         partitionToFilesNameLengthMap, false, false);
 
@@ -524,20 +531,20 @@ public class TestHoodieIndex extends TestHoodieMetadataBase {
     setUp(IndexType.BLOOM, true, false);
 
     // When timeline is empty, all commits are invalid
-    HoodieTimeline timeline = new HoodieDefaultTimeline(Collections.EMPTY_LIST.stream(), metaClient.getActiveTimeline()::getInstantDetails);
+    HoodieTimeline timeline = TIMELINE_FACTORY.createDefaultTimeline(Collections.EMPTY_LIST.stream(), metaClient.getActiveTimeline());
     assertTrue(timeline.empty());
     assertFalse(HoodieIndexUtils.checkIfValidCommit(timeline, "001"));
     assertFalse(HoodieIndexUtils.checkIfValidCommit(timeline, writeClient.createNewInstantTime()));
     assertFalse(HoodieIndexUtils.checkIfValidCommit(timeline, HoodieTableMetadata.SOLO_COMMIT_TIMESTAMP));
 
     // Valid when timeline contains the timestamp or the timestamp is before timeline start
-    final HoodieInstant instant1 = new HoodieInstant(false, HoodieTimeline.DELTA_COMMIT_ACTION, "010");
+    final HoodieInstant instant1 = INSTANT_GENERATOR.createNewInstant(HoodieInstant.State.COMPLETED, HoodieTimeline.DELTA_COMMIT_ACTION, "010");
     String instantTimestamp = writeClient.createNewInstantTime();
-    final HoodieInstant instant2 = new HoodieInstant(false, HoodieTimeline.DELTA_COMMIT_ACTION, writeClient.createNewInstantTime());
-    timeline = new HoodieDefaultTimeline(Stream.of(instant1, instant2), metaClient.getActiveTimeline()::getInstantDetails);
+    final HoodieInstant instant2 = INSTANT_GENERATOR.createNewInstant(HoodieInstant.State.COMPLETED, HoodieTimeline.DELTA_COMMIT_ACTION, writeClient.createNewInstantTime());
+    timeline = TIMELINE_FACTORY.createDefaultTimeline(Stream.of(instant1, instant2), metaClient.getActiveTimeline());
     assertFalse(timeline.empty());
-    assertTrue(HoodieIndexUtils.checkIfValidCommit(timeline, instant1.getTimestamp()));
-    assertTrue(HoodieIndexUtils.checkIfValidCommit(timeline, instant2.getTimestamp()));
+    assertTrue(HoodieIndexUtils.checkIfValidCommit(timeline, instant1.requestedTime()));
+    assertTrue(HoodieIndexUtils.checkIfValidCommit(timeline, instant2.requestedTime()));
     // no instant on timeline
     assertFalse(HoodieIndexUtils.checkIfValidCommit(timeline, instantTimestamp));
     // future timestamp
@@ -549,16 +556,16 @@ public class TestHoodieIndex extends TestHoodieMetadataBase {
     // Check for older timestamp which have sec granularity and an extension of DEFAULT_MILLIS_EXT may have been added via Timeline operations
     instantTimestamp = writeClient.createNewInstantTime();
     String instantTimestampSec = instantTimestamp.substring(0, instantTimestamp.length() - HoodieInstantTimeGenerator.DEFAULT_MILLIS_EXT.length());
-    final HoodieInstant instant3 = new HoodieInstant(false, HoodieTimeline.DELTA_COMMIT_ACTION, instantTimestampSec);
-    timeline = new HoodieDefaultTimeline(Stream.of(instant1, instant3), metaClient.getActiveTimeline()::getInstantDetails);
+    final HoodieInstant instant3 = INSTANT_GENERATOR.createNewInstant(HoodieInstant.State.COMPLETED, HoodieTimeline.DELTA_COMMIT_ACTION, instantTimestampSec);
+    timeline = TIMELINE_FACTORY.createDefaultTimeline(Stream.of(instant1, instant3), metaClient.getActiveTimeline());
     assertFalse(timeline.empty());
     assertFalse(HoodieIndexUtils.checkIfValidCommit(timeline, instantTimestamp));
     assertTrue(HoodieIndexUtils.checkIfValidCommit(timeline, instantTimestampSec));
 
     // With a sec format instant time lesser than first entry in the active timeline, checkifContainsOrBefore() should return true
     instantTimestamp = writeClient.createNewInstantTime();
-    final HoodieInstant instant4 = new HoodieInstant(false, HoodieTimeline.DELTA_COMMIT_ACTION, instantTimestamp);
-    timeline = new HoodieDefaultTimeline(Stream.of(instant4), metaClient.getActiveTimeline()::getInstantDetails);
+    final HoodieInstant instant4 = INSTANT_GENERATOR.createNewInstant(HoodieInstant.State.COMPLETED, HoodieTimeline.DELTA_COMMIT_ACTION, instantTimestamp);
+    timeline = TIMELINE_FACTORY.createDefaultTimeline(Stream.of(instant4), metaClient.getActiveTimeline());
     instantTimestampSec = instantTimestamp.substring(0, instantTimestamp.length() - HoodieInstantTimeGenerator.DEFAULT_MILLIS_EXT.length());
     assertFalse(timeline.empty());
     assertTrue(HoodieIndexUtils.checkIfValidCommit(timeline, instantTimestamp));
@@ -580,18 +587,19 @@ public class TestHoodieIndex extends TestHoodieMetadataBase {
     Thread.sleep(2000); // sleep required so that new timestamp differs in the seconds rather than msec
     String newTimestamp = writeClient.createNewInstantTime();
     String newTimestampSec = newTimestamp.substring(0, newTimestamp.length() - HoodieInstantTimeGenerator.DEFAULT_MILLIS_EXT.length());
-    final HoodieInstant instant5 = new HoodieInstant(true, HoodieTimeline.DELTA_COMMIT_ACTION, newTimestamp);
-    timeline = new HoodieDefaultTimeline(Stream.of(instant5), metaClient.getActiveTimeline()::getInstantDetails);
+    final HoodieInstant instant5 = INSTANT_GENERATOR.createNewInstant(HoodieInstant.State.INFLIGHT, HoodieTimeline.DELTA_COMMIT_ACTION, newTimestamp);
+    timeline = TIMELINE_FACTORY.createDefaultTimeline(Stream.of(instant5), metaClient.getActiveTimeline());
     assertFalse(timeline.empty());
     assertFalse(timeline.containsInstant(checkInstantTimestamp));
     assertFalse(timeline.containsInstant(checkInstantTimestampSec));
 
-    final HoodieInstant instant6 = new HoodieInstant(true, HoodieTimeline.DELTA_COMMIT_ACTION, newTimestampSec + HoodieInstantTimeGenerator.DEFAULT_MILLIS_EXT);
-    timeline = new HoodieDefaultTimeline(Stream.of(instant6), metaClient.getActiveTimeline()::getInstantDetails);
+    final HoodieInstant instant6 = INSTANT_GENERATOR.createNewInstant(HoodieInstant.State.INFLIGHT,
+        HoodieTimeline.DELTA_COMMIT_ACTION, newTimestampSec + HoodieInstantTimeGenerator.DEFAULT_MILLIS_EXT);
+    timeline = TIMELINE_FACTORY.createDefaultTimeline(Stream.of(instant6), metaClient.getActiveTimeline());
     assertFalse(timeline.empty());
     assertFalse(timeline.containsInstant(newTimestamp));
     assertFalse(timeline.containsInstant(checkInstantTimestamp));
-    assertTrue(timeline.containsInstant(instant6.getTimestamp()));
+    assertTrue(timeline.containsInstant(instant6.requestedTime()));
   }
 
   @Test

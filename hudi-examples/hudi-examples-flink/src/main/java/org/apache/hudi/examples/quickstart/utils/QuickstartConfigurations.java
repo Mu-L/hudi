@@ -18,12 +18,11 @@
 
 package org.apache.hudi.examples.quickstart.utils;
 
-import java.util.ArrayList;
-import java.util.HashMap;
-import java.util.List;
-import java.util.Map;
-import java.util.Objects;
-import java.util.stream.Collectors;
+import org.apache.hudi.configuration.FlinkOptions;
+import org.apache.hudi.examples.quickstart.factory.CollectSinkTableFactory;
+import org.apache.hudi.examples.quickstart.factory.ContinuousFileSourceFactory;
+import org.apache.hudi.streamer.FlinkStreamerConfig;
+
 import org.apache.flink.configuration.ConfigOption;
 import org.apache.flink.configuration.Configuration;
 import org.apache.flink.table.api.DataTypes;
@@ -32,10 +31,13 @@ import org.apache.flink.table.catalog.ResolvedSchema;
 import org.apache.flink.table.runtime.typeutils.RowDataSerializer;
 import org.apache.flink.table.types.DataType;
 import org.apache.flink.table.types.logical.RowType;
-import org.apache.hudi.configuration.FlinkOptions;
-import org.apache.hudi.examples.quickstart.factory.CollectSinkTableFactory;
-import org.apache.hudi.examples.quickstart.factory.ContinuousFileSourceFactory;
-import org.apache.hudi.streamer.FlinkStreamerConfig;
+
+import java.util.ArrayList;
+import java.util.HashMap;
+import java.util.List;
+import java.util.Map;
+import java.util.Objects;
+import java.util.stream.Collectors;
 
 /**
  * Configurations for the test.
@@ -111,12 +113,11 @@ public class QuickstartConfigurations {
   }
 
   public static String getCreateHudiCatalogDDL(final String catalogName, final String catalogPath) {
-    StringBuilder builder = new StringBuilder();
-    builder.append("create catalog ").append(catalogName).append(" with (\n");
-    builder.append("  'type' = 'hudi',\n"
-        + "  'catalog.path' = '").append(catalogPath).append("'");
-    builder.append("\n)");
-    return builder.toString();
+    return "create catalog " + catalogName + " with (\n"
+        + "  'type' = 'hudi',\n"
+        + "  'catalog.path' = '"
+        + catalogPath + "'"
+        + "\n)";
   }
 
   public static String getFileSourceDDL(String tableName) {
@@ -173,8 +174,7 @@ public class QuickstartConfigurations {
       }
       builder.append("\n");
     }
-    final String withProps = ""
-        + ") with (\n"
+    final String withProps = ") with (\n"
         + "  'connector' = '" + CollectSinkTableFactory.FACTORY_ID + "'\n"
         + ")";
     builder.append(withProps);

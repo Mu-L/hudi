@@ -18,6 +18,7 @@
 package org.apache.spark.sql.hudi.command.procedures
 
 import org.apache.hudi.DataSourceReadOptions
+
 import org.apache.spark.internal.Logging
 import org.apache.spark.sql.Row
 import org.apache.spark.sql.types.{DataTypes, Metadata, StructField, StructType}
@@ -77,8 +78,8 @@ class CopyToTempViewProcedure extends BaseProcedure with ProcedureBuilder with L
         sparkSession.read
           .format("org.apache.hudi")
           .option(DataSourceReadOptions.QUERY_TYPE.key, DataSourceReadOptions.QUERY_TYPE_INCREMENTAL_OPT_VAL)
-          .option(DataSourceReadOptions.BEGIN_INSTANTTIME.key, beginInstance)
-          .option(DataSourceReadOptions.END_INSTANTTIME.key, endInstance)
+          .option(DataSourceReadOptions.START_COMMIT.key, beginInstance)
+          .option(DataSourceReadOptions.END_COMMIT.key, endInstance)
           .load(tablePath)
       case DataSourceReadOptions.QUERY_TYPE_READ_OPTIMIZED_OPT_VAL =>
         sparkSession.read

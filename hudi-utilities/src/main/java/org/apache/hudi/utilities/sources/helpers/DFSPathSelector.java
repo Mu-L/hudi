@@ -19,6 +19,8 @@
 package org.apache.hudi.utilities.sources.helpers;
 
 import org.apache.hudi.common.config.TypedProperties;
+import org.apache.hudi.common.table.checkpoint.Checkpoint;
+import org.apache.hudi.common.table.checkpoint.StreamerCheckpointV2;
 import org.apache.hudi.common.util.Option;
 import org.apache.hudi.common.util.ReflectionUtils;
 import org.apache.hudi.common.util.collection.ImmutablePair;
@@ -100,13 +102,15 @@ public class DFSPathSelector implements Serializable {
    * Get the list of files changed since last checkpoint.
    *
    * @param sparkContext JavaSparkContext to help parallelize certain operations
-   * @param lastCheckpointStr the last checkpoint time string, empty if first run
+   * @param lastCheckpoint the last checkpoint time string, empty if first run
    * @param sourceLimit       max bytes to read each time
    * @return the list of files concatenated and their latest modified time
    */
-  public Pair<Option<String>, String> getNextFilePathsAndMaxModificationTime(JavaSparkContext sparkContext, Option<String> lastCheckpointStr,
-                                                                             long sourceLimit) {
-    return getNextFilePathsAndMaxModificationTime(lastCheckpointStr, sourceLimit);
+  public Pair<Option<String>, Checkpoint> getNextFilePathsAndMaxModificationTime(JavaSparkContext sparkContext,
+                                                                                 Option<Checkpoint> lastCheckpoint,
+                                                                                 long sourceLimit) {
+
+    return getNextFilePathsAndMaxModificationTime(lastCheckpoint, sourceLimit);
   }
 
   /**
@@ -117,13 +121,13 @@ public class DFSPathSelector implements Serializable {
    * @return the list of files concatenated and their latest modified time
    */
   @Deprecated
-  public Pair<Option<String>, String> getNextFilePathsAndMaxModificationTime(Option<String> lastCheckpointStr,
-                                                                             long sourceLimit) {
+  public Pair<Option<String>, Checkpoint> getNextFilePathsAndMaxModificationTime(Option<Checkpoint> lastCheckpointStr,
+                                                                                 long sourceLimit) {
     try {
       // obtain all eligible files under root folder.
       log.info("Root path => " + getStringWithAltKeys(props, DFSPathSelectorConfig.ROOT_INPUT_PATH)
           + " source limit => " + sourceLimit);
-      long lastCheckpointTime = lastCheckpointStr.map(Long::parseLong).orElse(Long.MIN_VALUE);
+      long lastCheckpointTime = lastCheckpointStr.map(e -> Long.parseLong(e.getCheckpointKey())).orElse(Long.MIN_VALUE);
       List<FileStatus> eligibleFiles = listEligibleFiles(
           fs, new Path(getStringWithAltKeys(props, DFSPathSelectorConfig.ROOT_INPUT_PATH)), lastCheckpointTime);
       // sort them by modification time.
@@ -147,13 +151,13 @@ public class DFSPathSelector implements Serializable {
 
       // no data to read
       if (filteredFiles.isEmpty()) {
-        return new ImmutablePair<>(Option.empty(), String.valueOf(newCheckpointTime));
+        return new ImmutablePair<>(Option.empty(), new StreamerCheckpointV2(String.valueOf(newCheckpointTime)));
       }
 
       // read the files out.
       String pathStr = filteredFiles.stream().map(f -> f.getPath().toString()).collect(Collectors.joining(","));
 
-      return new ImmutablePair<>(Option.ofNullable(pathStr), String.valueOf(newCheckpointTime));
+      return new ImmutablePair<>(Option.ofNullable(pathStr), new StreamerCheckpointV2(String.valueOf(newCheckpointTime)));
     } catch (IOException ioe) {
       throw new HoodieIOException("Unable to read from source from checkpoint: " + lastCheckpointStr, ioe);
     }
@@ -165,9 +169,9 @@ public class DFSPathSelector implements Serializable {
   protected List<FileStatus> listEligibleFiles(FileSystem fs, Path path, long lastCheckpointTime) throws IOException {
     // skip files/dirs whose names start with (_, ., etc)
     FileStatus[] statuses = fs.listStatus(path, file ->
-      IGNORE_FILEPREFIX_LIST.stream().noneMatch(pfx -> file.getName().startsWith(pfx)));
+        IGNORE_FILEPREFIX_LIST.stream().noneMatch(pfx -> file.getName().startsWith(pfx)));
     List<FileStatus> res = new ArrayList<>();
-    for (FileStatus status: statuses) {
+    for (FileStatus status : statuses) {
       if (status.isDirectory()) {
         // avoid infinite loop
         if (!status.isSymlink()) {

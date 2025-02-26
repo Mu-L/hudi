@@ -18,27 +18,27 @@
 
 package org.apache.hudi.functional
 
-import org.apache.hadoop.fs.Path
 import org.apache.hudi.DataSourceWriteOptions
 import org.apache.hudi.common.config.HoodieMetadataConfig
 import org.apache.hudi.common.fs.FSUtils
 import org.apache.hudi.common.model.HoodieTableType
-import org.apache.hudi.common.table.view.HoodieTableFileSystemView
 import org.apache.hudi.common.table.{HoodieTableMetaClient, HoodieTableVersion}
+import org.apache.hudi.common.table.view.HoodieTableFileSystemView
 import org.apache.hudi.config.HoodieCompactionConfig
-import org.apache.hudi.metadata.HoodieMetadataFileSystemView
+import org.apache.hudi.storage.StoragePath
 import org.apache.hudi.table.upgrade.{SparkUpgradeDowngradeHelper, UpgradeDowngrade}
+
 import org.apache.spark.sql.SaveMode
 import org.junit.jupiter.api.Assertions.{assertEquals, assertFalse, assertTrue}
 import org.junit.jupiter.api.Test
 import org.junit.jupiter.params.ParameterizedTest
 import org.junit.jupiter.params.provider.EnumSource
 
-import scala.jdk.CollectionConverters.{asScalaIteratorConverter, collectionAsScalaIterableConverter}
+import scala.collection.JavaConverters._
 
 class TestSixToFiveDowngradeHandler extends RecordLevelIndexTestBase {
 
-  private var partitionPaths: java.util.List[Path] = null
+  private var partitionPaths: java.util.List[StoragePath] = null
 
   @ParameterizedTest
   @EnumSource(classOf[HoodieTableType])
@@ -62,7 +62,7 @@ class TestSixToFiveDowngradeHandler extends RecordLevelIndexTestBase {
 
     new UpgradeDowngrade(metaClient, getWriteConfig(hudiOpts), context, SparkUpgradeDowngradeHelper.getInstance)
       .run(HoodieTableVersion.FIVE, null)
-    metaClient = HoodieTableMetaClient.reload(metaClient)
+    metaClient = getHoodieMetaClient(metaClient.getStorageConf, basePath)
     // Ensure file slices have been compacted and the MDT table has been deleted
     assertFalse(metaClient.getTableConfig.isMetadataTableAvailable)
     assertEquals(HoodieTableVersion.FIVE, metaClient.getTableConfig.getTableVersion)
@@ -114,9 +114,14 @@ class TestSixToFiveDowngradeHandler extends RecordLevelIndexTestBase {
     var numFileSlicesWithLogFiles = 0L
     val fsView = getTableFileSystemView(opts)
     getAllPartititonPaths(fsView).asScala.flatMap { partitionPath =>
-      val relativePath = FSUtils.getRelativePartitionPath(metaClient.getBasePathV2, partitionPath)
-      fsView.getLatestMergedFileSlicesBeforeOrOn(relativePath, getLatestMetaClient(false)
-        .getActiveTimeline.lastInstant().get().getTimestamp).iterator().asScala.toSeq
+      val relativePath = FSUtils.getRelativePartitionPath(metaClient.getBasePath, partitionPath)
+      val lastInstantOption = getLatestMetaClient(false).getActiveTimeline.lastInstant()
+      if (lastInstantOption.isPresent) {
+        fsView.getLatestMergedFileSlicesBeforeOrOn(relativePath, getLatestMetaClient(false)
+          .getActiveTimeline.lastInstant().get().requestedTime).iterator().asScala.toSeq
+      } else {
+        Seq.empty
+      }
     }.foreach(
       slice => if (slice.getLogFiles.count() > 0) {
         numFileSlicesWithLogFiles += 1
@@ -126,13 +131,13 @@ class TestSixToFiveDowngradeHandler extends RecordLevelIndexTestBase {
 
   private def getTableFileSystemView(opts: Map[String, String]): HoodieTableFileSystemView = {
     if (metaClient.getTableConfig.isMetadataTableAvailable) {
-      new HoodieMetadataFileSystemView(metaClient, metaClient.getActiveTimeline, metadataWriter(getWriteConfig(opts)).getTableMetadata)
+      new HoodieTableFileSystemView(metadataWriter(getWriteConfig(opts)).getTableMetadata, metaClient, metaClient.getActiveTimeline)
     } else {
-      new HoodieTableFileSystemView(metaClient, metaClient.getActiveTimeline)
+      HoodieTableFileSystemView.fileListingBasedFileSystemView(context, metaClient, metaClient.getActiveTimeline)
     }
   }
 
-  private def getAllPartititonPaths(fsView: HoodieTableFileSystemView): java.util.List[Path] = {
+  private def getAllPartititonPaths(fsView: HoodieTableFileSystemView): java.util.List[StoragePath] = {
     if (partitionPaths == null) {
       fsView.loadAllPartitions()
       partitionPaths = fsView.getPartitionPaths

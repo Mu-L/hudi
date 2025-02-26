@@ -24,14 +24,15 @@ import org.apache.hudi.SparkAdapterSupport$;
 import org.apache.hudi.common.model.HoodieCommitMetadata;
 import org.apache.hudi.common.table.HoodieTableMetaClient;
 import org.apache.hudi.common.table.timeline.HoodieTimeline;
+import org.apache.hudi.common.table.timeline.TimelineLayout;
 import org.apache.hudi.common.util.Option;
 import org.apache.hudi.common.util.StringUtils;
 import org.apache.hudi.exception.HoodieIOException;
+import org.apache.hudi.hadoop.fs.HadoopFSUtils;
 import org.apache.hudi.integ.testsuite.configuration.DeltaConfig;
 import org.apache.hudi.integ.testsuite.dag.ExecutionContext;
 import org.apache.hudi.integ.testsuite.schema.SchemaUtils;
 
-import org.apache.hadoop.conf.Configuration;
 import org.apache.hadoop.fs.FileStatus;
 import org.apache.hadoop.fs.FileSystem;
 import org.apache.hadoop.fs.Path;
@@ -167,7 +168,9 @@ public abstract class BaseValidateDatasetNode extends DagNode<Boolean> {
   }
 
   private void awaitUntilDeltaStreamerCaughtUp(ExecutionContext context, String hudiTablePath, FileSystem fs, String inputPath) throws IOException, InterruptedException {
-    HoodieTableMetaClient meta = HoodieTableMetaClient.builder().setConf(new Configuration(fs.getConf())).setBasePath(hudiTablePath).build();
+    HoodieTableMetaClient meta = HoodieTableMetaClient.builder()
+        .setConf(HadoopFSUtils.getStorageConfWithCopy(fs.getConf()))
+        .setBasePath(hudiTablePath).build();
     HoodieTimeline commitTimeline = meta.getActiveTimeline().getCommitsTimeline().filterCompletedInstants();
     Option<String> latestCheckpoint = getLatestCheckpoint(commitTimeline);
     FileStatus[] subDirs = fs.listStatus(new Path(inputPath));
@@ -197,8 +200,9 @@ public abstract class BaseValidateDatasetNode extends DagNode<Boolean> {
   private Option<String> getLatestCheckpoint(HoodieTimeline timeline) {
     return (Option<String>) timeline.getReverseOrderedInstants().map(instant -> {
       try {
-        HoodieCommitMetadata commitMetadata = HoodieCommitMetadata
-            .fromBytes(timeline.getInstantDetails(instant).get(), HoodieCommitMetadata.class);
+        TimelineLayout layout = TimelineLayout.fromVersion(timeline.getTimelineLayoutVersion());
+        HoodieCommitMetadata commitMetadata = layout.getCommitMetadataSerDe()
+            .deserialize(instant, timeline.getInstantDetails(instant).get(), HoodieCommitMetadata.class);
         if (!StringUtils.isNullOrEmpty(commitMetadata.getMetadata(CHECKPOINT_KEY))) {
           return Option.of(commitMetadata.getMetadata(CHECKPOINT_KEY));
         } else {

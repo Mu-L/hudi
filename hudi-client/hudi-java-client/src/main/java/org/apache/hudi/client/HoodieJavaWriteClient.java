@@ -18,7 +18,6 @@
 
 package org.apache.hudi.client;
 
-import org.apache.hudi.client.common.HoodieJavaEngineContext;
 import org.apache.hudi.client.embedded.EmbeddedTimelineService;
 import org.apache.hudi.common.data.HoodieListData;
 import org.apache.hudi.common.engine.HoodieEngineContext;
@@ -43,7 +42,6 @@ import org.apache.hudi.table.action.HoodieWriteMetadata;
 import org.apache.hudi.table.upgrade.JavaUpgradeDowngradeHelper;
 
 import com.codahale.metrics.Timer;
-import org.apache.hadoop.conf.Configuration;
 
 import java.util.List;
 import java.util.Map;
@@ -58,6 +56,11 @@ public class HoodieJavaWriteClient<T> extends
     this.tableServiceClient = new HoodieJavaTableServiceClient<>(context, writeConfig, getTimelineServer());
   }
 
+  @Override
+  protected void updateColumnsToIndexWithColStats(HoodieTableMetaClient metaClient, List<String> columnsToIndex) {
+    // no op
+  }
+
   public HoodieJavaWriteClient(HoodieEngineContext context,
                                HoodieWriteConfig writeConfig,
                                boolean rollbackPending,
@@ -69,7 +72,7 @@ public class HoodieJavaWriteClient<T> extends
   @Override
   public List<HoodieRecord<T>> filterExists(List<HoodieRecord<T>> hoodieRecords) {
     // Create a Hoodie table which encapsulated the commits and files visible
-    HoodieJavaTable<T> table = HoodieJavaTable.create(config, (HoodieJavaEngineContext) context);
+    HoodieJavaTable<T> table = HoodieJavaTable.create(config, context);
     Timer.Context indexTimer = metrics.getIndexCtx();
     List<HoodieRecord<T>> recordsWithLocation = getIndex().tagLocation(HoodieListData.eager(hoodieRecords), context, table).collectAsList();
     metrics.updateIndexMetrics(LOOKUP_STR, metrics.getDurationInMs(indexTimer == null ? 0L : indexTimer.stop()));
@@ -89,18 +92,18 @@ public class HoodieJavaWriteClient<T> extends
                         Map<String, List<String>> partitionToReplacedFileIds,
                         Option<BiConsumer<HoodieTableMetaClient, HoodieCommitMetadata>> extraPreCommitFunc) {
     List<HoodieWriteStat> writeStats = writeStatuses.stream().map(WriteStatus::getStat).collect(Collectors.toList());
-    return commitStats(instantTime, HoodieListData.eager(writeStatuses), writeStats, extraMetadata, commitActionType, partitionToReplacedFileIds,
+    return commitStats(instantTime, writeStats, extraMetadata, commitActionType, partitionToReplacedFileIds,
         extraPreCommitFunc);
   }
 
   @Override
-  protected HoodieTable createTable(HoodieWriteConfig config, Configuration hadoopConf) {
-    return HoodieJavaTable.create(config, context);
+  protected HoodieTable createTable(HoodieWriteConfig config) {
+    return createTableAndValidate(config, HoodieJavaTable::create);
   }
 
   @Override
-  protected HoodieTable createTable(HoodieWriteConfig config, Configuration hadoopConf, HoodieTableMetaClient metaClient) {
-    return HoodieJavaTable.create(config, context, metaClient);
+  protected HoodieTable createTable(HoodieWriteConfig config, HoodieTableMetaClient metaClient) {
+    return createTableAndValidate(config, metaClient, HoodieJavaTable::create);
   }
 
   @Override
@@ -173,7 +176,7 @@ public class HoodieJavaWriteClient<T> extends
   public void transitionInflight(String instantTime) {
     HoodieTableMetaClient metaClient = createMetaClient(true);
     metaClient.getActiveTimeline().transitionRequestedToInflight(
-        new HoodieInstant(HoodieInstant.State.REQUESTED, metaClient.getCommitActionType(), instantTime),
+        metaClient.createNewInstant(HoodieInstant.State.REQUESTED, metaClient.getCommitActionType(), instantTime),
         Option.empty(), config.shouldAllowMultiWriteOnSameInstant());
   }
 
@@ -209,29 +212,7 @@ public class HoodieJavaWriteClient<T> extends
   }
 
   @Override
-  public List<WriteStatus> postWrite(HoodieWriteMetadata<List<WriteStatus>> result,
-                                     String instantTime,
-                                     HoodieTable hoodieTable) {
-    if (result.getIndexLookupDuration().isPresent()) {
-      metrics.updateIndexMetrics(getOperationType().name(), result.getIndexUpdateDuration().get().toMillis());
-    }
-    if (result.isCommitted()) {
-      // Perform post commit operations.
-      if (result.getFinalizeDuration().isPresent()) {
-        metrics.updateFinalizeWriteMetrics(result.getFinalizeDuration().get().toMillis(),
-            result.getWriteStats().get().size());
-      }
-
-      postCommit(hoodieTable, result.getCommitMetadata().get(), instantTime, Option.empty());
-      mayBeCleanAndArchive(hoodieTable);
-
-      emitCommitMetrics(instantTime, result.getCommitMetadata().get(), hoodieTable.getMetaClient().getCommitActionType());
-    }
-    return result.getWriteStatuses();
-  }
-
-  @Override
-  protected void initMetadataTable(Option<String> instantTime) {
+  protected void initMetadataTable(Option<String> instantTime, HoodieTableMetaClient metaClient) {
     // Initialize Metadata Table to make sure it's bootstrapped _before_ the operation,
     // if it didn't exist before
     // See https://issues.apache.org/jira/browse/HUDI-3343 for more details
@@ -249,8 +230,8 @@ public class HoodieJavaWriteClient<T> extends
       return;
     }
 
-    try (HoodieTableMetadataWriter writer = JavaHoodieBackedTableMetadataWriter.create(context.getHadoopConf().get(), config,
-        context, inFlightInstantTimestamp)) {
+    try (HoodieTableMetadataWriter writer = JavaHoodieBackedTableMetadataWriter.create(
+        context.getStorageConf(), config, context, inFlightInstantTimestamp)) {
       if (writer.isInitialized()) {
         writer.performTableServices(inFlightInstantTimestamp);
       }

@@ -21,8 +21,8 @@ package org.apache.hudi.sink.clustering;
 import org.apache.hudi.avro.model.HoodieClusteringGroup;
 import org.apache.hudi.avro.model.HoodieClusteringPlan;
 import org.apache.hudi.common.model.ClusteringGroupInfo;
+import org.apache.hudi.common.model.ClusteringOperation;
 import org.apache.hudi.common.table.timeline.HoodieInstant;
-import org.apache.hudi.common.table.timeline.HoodieTimeline;
 import org.apache.hudi.common.util.ClusteringUtils;
 import org.apache.hudi.common.util.Option;
 import org.apache.hudi.common.util.collection.Pair;
@@ -42,7 +42,10 @@ import org.apache.flink.streaming.runtime.streamrecord.StreamRecord;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
+import java.util.HashMap;
 import java.util.List;
+import java.util.Map;
+import java.util.stream.Collectors;
 
 /**
  * Operator that generates the clustering plan with pluggable strategies on finished checkpoints.
@@ -115,11 +118,11 @@ public class ClusteringPlanOperator extends AbstractStreamOperator<ClusteringPla
       return;
     }
 
-    String clusteringInstantTime = firstRequested.get().getTimestamp();
+    String clusteringInstantTime = firstRequested.get().requestedTime();
 
     // generate clustering plan
     // should support configurable commit metadata
-    HoodieInstant clusteringInstant = HoodieTimeline.getReplaceCommitRequestedInstant(clusteringInstantTime);
+    HoodieInstant clusteringInstant = firstRequested.get();
     Option<Pair<HoodieInstant, HoodieClusteringPlan>> clusteringPlanOption = ClusteringUtils.getClusteringPlan(
         table.getMetaClient(), clusteringInstant);
 
@@ -137,13 +140,25 @@ public class ClusteringPlanOperator extends AbstractStreamOperator<ClusteringPla
       LOG.info("Empty clustering plan for instant " + clusteringInstantTime);
     } else {
       // Mark instant as clustering inflight
-      table.getActiveTimeline().transitionReplaceRequestedToInflight(clusteringInstant, Option.empty());
+      ClusteringUtils.transitionClusteringOrReplaceRequestedToInflight(clusteringInstant, Option.empty(), table.getActiveTimeline());
       table.getMetaClient().reloadActiveTimeline();
 
+      Map<String, Integer> groupIndexMap = new HashMap<>();
+      int index = 0;
       for (HoodieClusteringGroup clusteringGroup : clusteringPlan.getInputGroups()) {
+        ClusteringGroupInfo groupInfo = ClusteringGroupInfo.create(clusteringGroup);
+        String groupFileIds = groupInfo.getOperations().stream().map(ClusteringOperation::getFileId).collect(Collectors.joining());
+        int groupIndex;
+        if (groupIndexMap.containsKey(groupFileIds)) {
+          groupIndex = groupIndexMap.get(groupFileIds);
+        } else {
+          groupIndex = index;
+          groupIndexMap.put(groupFileIds, groupIndex);
+          index++;
+        }
         LOG.info("Execute clustering plan for instant {} as {} file slices", clusteringInstantTime, clusteringGroup.getSlices().size());
         output.collect(new StreamRecord<>(
-            new ClusteringPlanEvent(clusteringInstantTime, ClusteringGroupInfo.create(clusteringGroup), clusteringPlan.getStrategy().getStrategyParams())
+            new ClusteringPlanEvent(clusteringInstantTime, groupInfo, clusteringPlan.getStrategy().getStrategyParams(), groupIndex)
         ));
       }
     }

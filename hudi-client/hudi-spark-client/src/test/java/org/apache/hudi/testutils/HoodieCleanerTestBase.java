@@ -30,7 +30,8 @@ import org.apache.hudi.common.model.HoodieWriteStat;
 import org.apache.hudi.common.table.HoodieTableMetaClient;
 import org.apache.hudi.common.table.timeline.HoodieInstant;
 import org.apache.hudi.common.table.timeline.HoodieTimeline;
-import org.apache.hudi.common.testutils.FileCreateUtils;
+import org.apache.hudi.common.testutils.FileCreateUtilsLegacy;
+import org.apache.hudi.common.testutils.HoodieMetadataTestTable;
 import org.apache.hudi.common.testutils.HoodieTestTable;
 import org.apache.hudi.common.testutils.HoodieTestUtils;
 import org.apache.hudi.common.util.CleanerUtils;
@@ -39,8 +40,8 @@ import org.apache.hudi.config.HoodieWriteConfig;
 import org.apache.hudi.exception.HoodieIOException;
 import org.apache.hudi.metadata.HoodieTableMetadata;
 import org.apache.hudi.metadata.HoodieTableMetadataWriter;
-
-import org.apache.hadoop.fs.Path;
+import org.apache.hudi.metadata.SparkHoodieBackedTableMetadataWriter;
+import org.apache.hudi.storage.StoragePath;
 
 import java.io.File;
 import java.io.IOException;
@@ -50,8 +51,9 @@ import java.util.List;
 import java.util.Map;
 import java.util.stream.Collectors;
 
-import static org.apache.hudi.common.bootstrap.TestBootstrapIndex.generateBootstrapIndex;
+import static org.apache.hudi.common.bootstrap.index.TestBootstrapIndex.generateBootstrapIndex;
 import static org.apache.hudi.common.table.timeline.TimelineMetadataUtils.serializeCommitMetadata;
+import static org.apache.hudi.common.testutils.HoodieTestUtils.INSTANT_GENERATOR;
 import static org.apache.hudi.common.testutils.HoodieTestTable.makeNewCommitTime;
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertTrue;
@@ -116,13 +118,13 @@ public class HoodieCleanerTestBase extends HoodieClientTestBase {
     }
 
     if (simulateRetryFailure) {
-      HoodieInstant completedCleanInstant = new HoodieInstant(HoodieInstant.State.COMPLETED, HoodieTimeline.CLEAN_ACTION, cleanInstantTs);
+      HoodieInstant completedCleanInstant = INSTANT_GENERATOR.createNewInstant(HoodieInstant.State.COMPLETED, HoodieTimeline.CLEAN_ACTION, cleanInstantTs);
       HoodieCleanMetadata metadata = CleanerUtils.getCleanerMetadata(metaClient, completedCleanInstant);
       metadata.getPartitionMetadata().values().forEach(p -> {
         String dirPath = metaClient.getBasePath() + "/" + p.getPartitionPath();
         p.getSuccessDeleteFiles().forEach(p2 -> {
           try {
-            metaClient.getFs().create(new Path(dirPath, p2), true).close();
+            metaClient.getStorage().create(new StoragePath(dirPath, p2), true).close();
           } catch (IOException e) {
             throw new HoodieIOException(e.getMessage(), e);
           }
@@ -132,11 +134,10 @@ public class HoodieCleanerTestBase extends HoodieClientTestBase {
 
       if (config.isMetadataTableEnabled() && simulateMetadataFailure) {
         // Simulate the failure of corresponding instant in the metadata table
-        HoodieTableMetaClient metadataMetaClient = HoodieTableMetaClient.builder()
-            .setBasePath(HoodieTableMetadata.getMetadataTableBasePath(metaClient.getBasePath()))
-            .setConf(metaClient.getHadoopConf())
-            .build();
-        HoodieInstant deltaCommit = new HoodieInstant(false, HoodieTimeline.DELTA_COMMIT_ACTION, cleanInstantTs);
+        HoodieTableMetaClient metadataMetaClient = HoodieTestUtils.createMetaClient(
+            metaClient.getStorageConf(),
+            HoodieTableMetadata.getMetadataTableBasePath(metaClient.getBasePath()), metaClient.getTableConfig().getTableVersion());
+        HoodieInstant deltaCommit = INSTANT_GENERATOR.createNewInstant(HoodieInstant.State.COMPLETED, HoodieTimeline.DELTA_COMMIT_ACTION, cleanInstantTs);
         metadataMetaClient.reloadActiveTimeline().revertToInflight(deltaCommit);
       }
 
@@ -159,7 +160,7 @@ public class HoodieCleanerTestBase extends HoodieClientTestBase {
             .withFailedDeletes(x.getFailedDeleteFiles()).withSuccessfulDeletes(x.getSuccessDeleteFiles())
             .withPolicy(HoodieCleaningPolicy.valueOf(x.getPolicy())).withDeletePathPattern(x.getDeletePathPatterns())
             .withEarliestCommitRetained(Option.ofNullable(cleanMetadata1.getEarliestCommitToRetain() != null
-                ? new HoodieInstant(HoodieInstant.State.COMPLETED, HoodieTimeline.COMMIT_ACTION, "000")
+                ? INSTANT_GENERATOR.createNewInstant(HoodieInstant.State.COMPLETED, HoodieTimeline.COMMIT_ACTION, "000")
                 : null))
             .build())
         .collect(Collectors.toMap(HoodieCleanStat::getPartitionPath, x -> x));
@@ -169,7 +170,7 @@ public class HoodieCleanerTestBase extends HoodieClientTestBase {
           .withFailedDeletes(s.getFailedDeleteFiles()).withSuccessfulDeletes(s.getSuccessDeleteFiles())
           .withPolicy(HoodieCleaningPolicy.valueOf(x.getPolicy())).withDeletePathPattern(s.getDeletePathPatterns())
           .withEarliestCommitRetained(Option.ofNullable(s.getEarliestCommitToRetain())
-              .map(y -> new HoodieInstant(HoodieInstant.State.COMPLETED, HoodieTimeline.COMMIT_ACTION, y)))
+              .map(y -> INSTANT_GENERATOR.createNewInstant(HoodieInstant.State.COMPLETED, HoodieTimeline.COMMIT_ACTION, y)))
           .withSuccessfulDeleteBootstrapBaseFiles(x.getSuccessDeleteFiles())
           .withFailedDeleteBootstrapBaseFiles(x.getFailedDeleteFiles())
           .withDeleteBootstrapBasePathPatterns(x.getDeletePathPatterns()).build());
@@ -178,18 +179,18 @@ public class HoodieCleanerTestBase extends HoodieClientTestBase {
   }
 
   public void commitWithMdt(String instantTime, Map<String, List<String>> partToFileId,
-                            HoodieTestTable testTable, HoodieTableMetadataWriter metadataWriter) throws Exception {
-    commitWithMdt(instantTime, partToFileId, testTable, metadataWriter, true, false);
+                            HoodieTestTable testTable, HoodieWriteConfig config) throws Exception {
+    commitWithMdt(instantTime, partToFileId, testTable, config, true, false);
   }
 
   public void commitWithMdt(String instantTime, Map<String, List<String>> partToFileId,
-                            HoodieTestTable testTable, HoodieTableMetadataWriter metadataWriter, boolean addBaseFiles, boolean addLogFiles) throws Exception {
+                            HoodieTestTable testTable, HoodieWriteConfig config, boolean addBaseFiles, boolean addLogFiles) throws Exception {
     testTable.addInflightCommit(instantTime);
     Map<String, List<String>> partToFileIds = new HashMap<>();
     partToFileId.forEach((key, value) -> {
       try {
         List<String> files = new ArrayList<>();
-        FileCreateUtils.createPartitionMetaFile(basePath, key);
+        FileCreateUtilsLegacy.createPartitionMetaFile(basePath, key);
         if (addBaseFiles) {
           files.addAll(testTable.withBaseFilesInPartition(key, value.toArray(new String[0])).getValue());
         }
@@ -208,12 +209,23 @@ public class HoodieCleanerTestBase extends HoodieClientTestBase {
       }
     });
     HoodieCommitMetadata commitMeta = generateCommitMetadata(instantTime, partToFileIds);
-    metadataWriter.performTableServices(Option.of(instantTime));
-    metadataWriter.updateFromWriteStatuses(commitMeta, context.emptyHoodieData(), instantTime);
-    metaClient.getActiveTimeline().saveAsComplete(
-        new HoodieInstant(HoodieInstant.State.INFLIGHT, HoodieTimeline.COMMIT_ACTION, instantTime),
-        serializeCommitMetadata(commitMeta));
-    metaClient = HoodieTableMetaClient.reload(metaClient);
+    try (HoodieTableMetadataWriter metadataWriter = getMetadataWriter(config)) {
+      metadataWriter.performTableServices(Option.of(instantTime), true);
+      metadataWriter.update(commitMeta, instantTime);
+      metaClient.getActiveTimeline().saveAsComplete(
+          INSTANT_GENERATOR.createNewInstant(HoodieInstant.State.INFLIGHT, HoodieTimeline.COMMIT_ACTION, instantTime),
+          serializeCommitMetadata(metaClient.getCommitMetadataSerDe(), commitMeta));
+      metaClient = HoodieTableMetaClient.reload(metaClient);
+    }
+  }
+
+  protected HoodieTableMetadataWriter getMetadataWriter(HoodieWriteConfig config) {
+    return SparkHoodieBackedTableMetadataWriter.create(storageConf, config, context);
+  }
+
+  protected HoodieTestTable tearDownTestTableAndReinit(HoodieTestTable testTable, HoodieWriteConfig config) throws Exception {
+    testTable.close();
+    return HoodieMetadataTestTable.of(metaClient, getMetadataWriter(config), Option.of(context));
   }
 
   /**

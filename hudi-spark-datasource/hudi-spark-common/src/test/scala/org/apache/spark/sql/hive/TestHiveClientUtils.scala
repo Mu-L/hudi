@@ -18,13 +18,14 @@
 package org.apache.spark.sql.hive
 
 import org.apache.hudi.common.testutils.HoodieTestUtils.getJavaVersion
+
 import org.apache.spark.sql.SparkSession
 import org.apache.spark.sql.hive.client.HiveClient
 import org.apache.spark.sql.hive.test.{TestHive, TestHiveContext}
 import org.apache.spark.sql.internal.StaticSQLConf.CATALOG_IMPLEMENTATION
 import org.junit.Assume
-import org.junit.jupiter.api.TestInstance.Lifecycle
 import org.junit.jupiter.api.{BeforeAll, Test, TestInstance}
+import org.junit.jupiter.api.TestInstance.Lifecycle
 
 @TestInstance(Lifecycle.PER_CLASS)
 class TestHiveClientUtils {

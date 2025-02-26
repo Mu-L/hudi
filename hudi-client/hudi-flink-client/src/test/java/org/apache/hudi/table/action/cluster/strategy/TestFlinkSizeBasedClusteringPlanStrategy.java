@@ -25,10 +25,12 @@ import org.apache.hudi.common.fs.FSUtils;
 import org.apache.hudi.common.model.FileSlice;
 import org.apache.hudi.common.model.HoodieBaseFile;
 import org.apache.hudi.common.model.HoodieFileGroupId;
+import org.apache.hudi.common.table.HoodieTableConfig;
 import org.apache.hudi.config.HoodieClusteringConfig;
 import org.apache.hudi.config.HoodieWriteConfig;
 import org.apache.hudi.table.HoodieFlinkCopyOnWriteTable;
 import org.apache.hudi.table.action.cluster.ClusteringPlanPartitionFilterMode;
+
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
 import org.mockito.Mock;
@@ -72,7 +74,7 @@ public class TestFlinkSizeBasedClusteringPlanStrategy {
           .build())
         .build();
     PartitionAwareClusteringPlanStrategy strategyWithSortEnabled = new FlinkSizeBasedClusteringPlanStrategy(table, context, configWithSortEnabled);
-    Stream<HoodieClusteringGroup> groupStreamSort = strategyWithSortEnabled.buildClusteringGroupsForPartition(partition,fileSliceGroups);
+    Stream<HoodieClusteringGroup> groupStreamSort = (Stream<HoodieClusteringGroup>) strategyWithSortEnabled.buildClusteringGroupsForPartition(partition,fileSliceGroups).getLeft();
     assertEquals(1, groupStreamSort.count());
 
     // test buildClusteringGroupsForPartition without ClusteringSortColumns config
@@ -84,13 +86,14 @@ public class TestFlinkSizeBasedClusteringPlanStrategy {
           .build())
         .build();
     PartitionAwareClusteringPlanStrategy strategyWithSortDisabled = new FlinkSizeBasedClusteringPlanStrategy(table, context, configWithSortDisabled);
-    Stream<HoodieClusteringGroup> groupStreamWithOutSort = strategyWithSortDisabled.buildClusteringGroupsForPartition(partition,fileSliceGroups);
+    Stream<HoodieClusteringGroup> groupStreamWithOutSort = (Stream<HoodieClusteringGroup>) strategyWithSortDisabled.buildClusteringGroupsForPartition(partition,fileSliceGroups).getLeft();
     assertEquals(0, groupStreamWithOutSort.count());
   }
 
   private FileSlice generateFileSlice(String partitionPath, String fileId, String baseInstant) {
     FileSlice fs = new FileSlice(new HoodieFileGroupId(partitionPath, fileId), baseInstant);
-    fs.setBaseFile(new HoodieBaseFile(FSUtils.makeBaseFileName(baseInstant, "1-0-1", fileId)));
+    fs.setBaseFile(new HoodieBaseFile(FSUtils.makeBaseFileName(baseInstant, "1-0-1", fileId,
+        HoodieTableConfig.BASE_FILE_FORMAT.defaultValue().getFileExtension())));
     return fs;
   }
 }

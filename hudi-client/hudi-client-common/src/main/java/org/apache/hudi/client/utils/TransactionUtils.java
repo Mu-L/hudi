@@ -66,17 +66,17 @@ public class TransactionUtils {
       final Option<HoodieCommitMetadata> thisCommitMetadata,
       final HoodieWriteConfig config,
       Option<HoodieInstant> lastCompletedTxnOwnerInstant,
-      boolean reloadActiveTimeline,
+      boolean timelineRefreshedWithinTransaction,
       Set<String> pendingInstants) throws HoodieWriteConflictException {
     WriteOperationType operationType = thisCommitMetadata.map(HoodieCommitMetadata::getOperationType).orElse(null);
     if (config.needResolveWriteConflict(operationType)) {
       // deal with pendingInstants
-      Stream<HoodieInstant> completedInstantsDuringCurrentWriteOperation = getCompletedInstantsDuringCurrentWriteOperation(table.getMetaClient(), pendingInstants);
-
-      ConflictResolutionStrategy resolutionStrategy = config.getWriteConflictResolutionStrategy();
-      if (reloadActiveTimeline) {
+      if (!timelineRefreshedWithinTransaction) {
         table.getMetaClient().reloadActiveTimeline();
       }
+      Stream<HoodieInstant> completedInstantsDuringCurrentWriteOperation = getCompletedInstantsDuringCurrentWriteOperation(table.getMetaClient(), pendingInstants);
+      ConflictResolutionStrategy resolutionStrategy = config.getWriteConflictResolutionStrategy();
+
       Stream<HoodieInstant> instantStream = Stream.concat(resolutionStrategy.getCandidateInstants(
           table.getMetaClient(), currentTxnOwnerInstant.get(), lastCompletedTxnOwnerInstant),
               completedInstantsDuringCurrentWriteOperation);
@@ -136,25 +136,30 @@ public class TransactionUtils {
   public static Set<String> getInflightAndRequestedInstants(HoodieTableMetaClient metaClient) {
     // collect InflightAndRequest instants for deltaCommit/commit/compaction/clustering
     Set<String> timelineActions = CollectionUtils
-        .createImmutableSet(HoodieTimeline.REPLACE_COMMIT_ACTION, HoodieTimeline.COMPACTION_ACTION, HoodieTimeline.DELTA_COMMIT_ACTION, HoodieTimeline.COMMIT_ACTION);
+        .createImmutableSet(HoodieTimeline.REPLACE_COMMIT_ACTION, HoodieTimeline.CLUSTERING_ACTION, HoodieTimeline.COMPACTION_ACTION, HoodieTimeline.DELTA_COMMIT_ACTION, HoodieTimeline.COMMIT_ACTION);
     return metaClient
         .getActiveTimeline()
         .getTimelineOfActions(timelineActions)
         .filterInflightsAndRequested()
         .getInstantsAsStream()
-        .map(HoodieInstant::getTimestamp)
+        .map(HoodieInstant::requestedTime)
         .collect(Collectors.toSet());
   }
 
+  /**
+   * Helper to find the instants that completed during this operation.
+   * @param metaClient client that was created or refreshed within the transaction
+   * @param pendingInstants pending instants to compare
+   * @return instants that completed during this operation
+   */
   public static Stream<HoodieInstant> getCompletedInstantsDuringCurrentWriteOperation(HoodieTableMetaClient metaClient, Set<String> pendingInstants) {
     // deal with pendingInstants
     // some pending instants maybe finished during current write operation,
     // we should check the conflict of those pending operation
     return metaClient
-        .reloadActiveTimeline()
         .getCommitsTimeline()
         .filterCompletedInstants()
         .getInstantsAsStream()
-        .filter(f -> pendingInstants.contains(f.getTimestamp()));
+        .filter(f -> pendingInstants.contains(f.requestedTime()));
   }
 }

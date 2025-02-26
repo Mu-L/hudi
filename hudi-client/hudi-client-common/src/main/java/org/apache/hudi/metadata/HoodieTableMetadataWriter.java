@@ -22,12 +22,10 @@ import org.apache.hudi.avro.model.HoodieCleanMetadata;
 import org.apache.hudi.avro.model.HoodieIndexPartitionInfo;
 import org.apache.hudi.avro.model.HoodieRestoreMetadata;
 import org.apache.hudi.avro.model.HoodieRollbackMetadata;
-import org.apache.hudi.client.WriteStatus;
-import org.apache.hudi.common.data.HoodieData;
 import org.apache.hudi.common.engine.HoodieEngineContext;
 import org.apache.hudi.common.model.HoodieCommitMetadata;
-import org.apache.hudi.common.model.HoodieRecord;
 import org.apache.hudi.common.util.Option;
+import org.apache.hudi.common.util.VisibleForTesting;
 
 import java.io.IOException;
 import java.io.Serializable;
@@ -43,8 +41,9 @@ public interface HoodieTableMetadataWriter extends Serializable, AutoCloseable {
    *
    * @param engineContext
    * @param indexPartitionInfos - information about partitions to build such as partition type and base instant time
+   * @param instantTime The async index instant time from data table
    */
-  void buildMetadataPartitions(HoodieEngineContext engineContext, List<HoodieIndexPartitionInfo> indexPartitionInfos) throws IOException;
+  void buildMetadataPartitions(HoodieEngineContext engineContext, List<HoodieIndexPartitionInfo> indexPartitionInfos, String instantTime) throws IOException;
 
   /**
    * Drop the given metadata partitions.
@@ -52,26 +51,14 @@ public interface HoodieTableMetadataWriter extends Serializable, AutoCloseable {
    * @param metadataPartitions List of MDT partitions to drop
    * @throws IOException on failures
    */
-  void dropMetadataPartitions(List<MetadataPartitionType> metadataPartitions) throws IOException;
+  void dropMetadataPartitions(List<String> metadataPartitions) throws IOException;
 
   /**
    * Update the metadata table due to a COMMIT operation.
-   *
    * @param commitMetadata commit metadata of the operation of interest.
    * @param instantTime    instant time of the commit.
    */
-  void updateFromWriteStatuses(HoodieCommitMetadata commitMetadata, HoodieData<WriteStatus> writeStatuses, String instantTime);
-
-  /**
-   * Update the metadata table due to a COMMIT or REPLACECOMMIT operation.
-   * As compared to {@link #updateFromWriteStatuses(HoodieCommitMetadata, HoodieData, String)}, this method
-   * directly updates metadata with the given records, instead of first converting {@link WriteStatus} to {@link HoodieRecord}.
-   *
-   * @param commitMetadata commit metadata of the operation of interest.
-   * @param records        records to update metadata with.
-   * @param instantTime    instant time of the commit.
-   */
-  void update(HoodieCommitMetadata commitMetadata, HoodieData<HoodieRecord> records, String instantTime);
+  void update(HoodieCommitMetadata commitMetadata, String instantTime);
 
   /**
    * Update the metadata table due to a CLEAN operation.
@@ -115,6 +102,18 @@ public interface HoodieTableMetadataWriter extends Serializable, AutoCloseable {
    *
    * @param inFlightInstantTimestamp Timestamp of an instant which is in-progress. This instant is ignored while
    *                                 deciding if optimizations can be performed.
+   * @param requiresTimelineRefresh set to true only if timeline requires reload, mainly used for testing
    */
-  void performTableServices(Option<String> inFlightInstantTimestamp);
+  @VisibleForTesting
+  void performTableServices(Option<String> inFlightInstantTimestamp, boolean requiresTimelineRefresh);
+
+  /**
+   * Perform various table services like compaction, cleaning, archiving on the MDT if required.
+   *
+   * @param inFlightInstantTimestamp Timestamp of an instant which is in-progress. This instant is ignored while
+   *                                 deciding if optimizations can be performed.
+   */
+  default void performTableServices(Option<String> inFlightInstantTimestamp) {
+    performTableServices(inFlightInstantTimestamp, false);
+  }
 }

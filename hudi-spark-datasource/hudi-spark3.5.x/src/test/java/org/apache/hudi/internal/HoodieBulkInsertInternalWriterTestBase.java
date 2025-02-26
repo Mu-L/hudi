@@ -58,7 +58,7 @@ public class HoodieBulkInsertInternalWriterTestBase extends HoodieSparkClientTes
   public void setUp() throws Exception {
     initSparkContexts();
     initPath();
-    initFileSystem();
+    initHoodieStorage();
     initTestDataGenerator();
     initMetaClient();
     initTimelineService();
@@ -121,8 +121,8 @@ public class HoodieBulkInsertInternalWriterTestBase extends HoodieSparkClientTes
         assertEquals(writeStatus.getTotalRecords(), sizeMap.get(HoodieTestDataGenerator.DEFAULT_PARTITION_PATHS[counter % 3]));
       }
       assertNull(writeStatus.getGlobalError());
-      assertEquals(writeStatus.getTotalErrorRecords(), 0);
-      assertEquals(writeStatus.getTotalErrorRecords(), 0);
+      assertEquals(0, writeStatus.getTotalErrorRecords());
+      assertEquals(0, writeStatus.getTotalErrorRecords());
       assertFalse(writeStatus.hasErrors());
       assertNotNull(writeStatus.getFileId());
       String fileId = writeStatus.getFileId();

@@ -1,4 +1,3 @@
-package org.apache.hudi.client.embedded;
 /*
  * Licensed to the Apache Software Foundation (ASF) under one
  * or more contributor license agreements.  See the NOTICE file
@@ -17,19 +16,24 @@ package org.apache.hudi.client.embedded;
  * limitations under the License.
  */
 
+package org.apache.hudi.client.embedded;
+
 import org.apache.hudi.common.config.HoodieMetadataConfig;
 import org.apache.hudi.common.engine.HoodieEngineContext;
 import org.apache.hudi.common.engine.HoodieLocalEngineContext;
+import org.apache.hudi.common.table.view.FileSystemViewStorageConfig;
 import org.apache.hudi.common.testutils.HoodieCommonTestHarness;
 import org.apache.hudi.config.HoodieWriteConfig;
 import org.apache.hudi.timeline.service.TimelineService;
 
-import org.apache.hadoop.conf.Configuration;
 import org.junit.jupiter.api.Test;
 import org.mockito.Mockito;
 
+import static org.apache.hudi.common.testutils.HoodieTestUtils.getDefaultStorageConf;
+import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertNotSame;
 import static org.junit.jupiter.api.Assertions.assertSame;
+import static org.junit.jupiter.api.Assertions.assertTrue;
 import static org.mockito.ArgumentMatchers.any;
 import static org.mockito.Mockito.never;
 import static org.mockito.Mockito.times;
@@ -43,7 +47,7 @@ public class TestEmbeddedTimelineService extends HoodieCommonTestHarness {
 
   @Test
   public void embeddedTimelineServiceReused() throws Exception {
-    HoodieEngineContext engineContext = new HoodieLocalEngineContext(new Configuration());
+    HoodieEngineContext engineContext = new HoodieLocalEngineContext(getDefaultStorageConf());
     HoodieWriteConfig writeConfig1 = HoodieWriteConfig.newBuilder()
         .withPath(tempDir.resolve("table1").toString())
         .withEmbeddedTimelineServerEnabled(true)
@@ -51,7 +55,7 @@ public class TestEmbeddedTimelineService extends HoodieCommonTestHarness {
         .build();
     EmbeddedTimelineService.TimelineServiceCreator mockCreator = Mockito.mock(EmbeddedTimelineService.TimelineServiceCreator.class);
     TimelineService mockService = Mockito.mock(TimelineService.class);
-    when(mockCreator.create(any(), any(), any(), any(), any())).thenReturn(mockService);
+    when(mockCreator.create(any(), any(), any(), any())).thenReturn(mockService);
     when(mockService.startService()).thenReturn(123);
     EmbeddedTimelineService service1 = EmbeddedTimelineService.getOrStartEmbeddedTimelineService(engineContext, null, writeConfig1, mockCreator);
 
@@ -59,11 +63,18 @@ public class TestEmbeddedTimelineService extends HoodieCommonTestHarness {
         .withPath(tempDir.resolve("table2").toString())
         .withEmbeddedTimelineServerEnabled(true)
         .withEmbeddedTimelineServerReuseEnabled(true)
+        .withFileSystemViewConfig(FileSystemViewStorageConfig.newBuilder()
+            .withRemoteTimelineClientRetry(true)
+            .build())
         .build();
     EmbeddedTimelineService.TimelineServiceCreator mockCreator2 = Mockito.mock(EmbeddedTimelineService.TimelineServiceCreator.class);
     // do not mock the create method since that should never be called
     EmbeddedTimelineService service2 = EmbeddedTimelineService.getOrStartEmbeddedTimelineService(engineContext, null, writeConfig2, mockCreator2);
     assertSame(service1, service2);
+
+    // Test client properties are not overridden
+    assertFalse(service1.getRemoteFileSystemViewConfig(writeConfig1).isRemoteTimelineClientRetryEnabled());
+    assertTrue(service1.getRemoteFileSystemViewConfig(writeConfig2).isRemoteTimelineClientRetryEnabled());
 
     // test shutdown happens after the last path is removed
     service1.stopForBasePath(writeConfig2.getBasePath());
@@ -77,7 +88,7 @@ public class TestEmbeddedTimelineService extends HoodieCommonTestHarness {
 
   @Test
   public void embeddedTimelineServiceCreatedForDifferentMetadataConfig() throws Exception {
-    HoodieEngineContext engineContext = new HoodieLocalEngineContext(new Configuration());
+    HoodieEngineContext engineContext = new HoodieLocalEngineContext(getDefaultStorageConf());
     HoodieWriteConfig writeConfig1 = HoodieWriteConfig.newBuilder()
         .withPath(tempDir.resolve("table1").toString())
         .withEmbeddedTimelineServerEnabled(true)
@@ -85,7 +96,7 @@ public class TestEmbeddedTimelineService extends HoodieCommonTestHarness {
         .build();
     EmbeddedTimelineService.TimelineServiceCreator mockCreator = Mockito.mock(EmbeddedTimelineService.TimelineServiceCreator.class);
     TimelineService mockService = Mockito.mock(TimelineService.class);
-    when(mockCreator.create(any(), any(), any(), any(), any())).thenReturn(mockService);
+    when(mockCreator.create(any(), any(), any(), any())).thenReturn(mockService);
     when(mockService.startService()).thenReturn(321);
     EmbeddedTimelineService service1 = EmbeddedTimelineService.getOrStartEmbeddedTimelineService(engineContext, null, writeConfig1, mockCreator);
 
@@ -99,7 +110,7 @@ public class TestEmbeddedTimelineService extends HoodieCommonTestHarness {
         .build();
     EmbeddedTimelineService.TimelineServiceCreator mockCreator2 = Mockito.mock(EmbeddedTimelineService.TimelineServiceCreator.class);
     TimelineService mockService2 = Mockito.mock(TimelineService.class);
-    when(mockCreator2.create(any(), any(), any(), any(), any())).thenReturn(mockService2);
+    when(mockCreator2.create(any(), any(), any(), any())).thenReturn(mockService2);
     when(mockService2.startService()).thenReturn(456);
     EmbeddedTimelineService service2 = EmbeddedTimelineService.getOrStartEmbeddedTimelineService(engineContext, null, writeConfig2, mockCreator2);
     assertNotSame(service1, service2);
@@ -114,7 +125,7 @@ public class TestEmbeddedTimelineService extends HoodieCommonTestHarness {
 
   @Test
   public void embeddedTimelineServerNotReusedIfReuseDisabled() throws Exception {
-    HoodieEngineContext engineContext = new HoodieLocalEngineContext(new Configuration());
+    HoodieEngineContext engineContext = new HoodieLocalEngineContext(getDefaultStorageConf());
     HoodieWriteConfig writeConfig1 = HoodieWriteConfig.newBuilder()
         .withPath(tempDir.resolve("table1").toString())
         .withEmbeddedTimelineServerEnabled(true)
@@ -122,7 +133,7 @@ public class TestEmbeddedTimelineService extends HoodieCommonTestHarness {
         .build();
     EmbeddedTimelineService.TimelineServiceCreator mockCreator = Mockito.mock(EmbeddedTimelineService.TimelineServiceCreator.class);
     TimelineService mockService = Mockito.mock(TimelineService.class);
-    when(mockCreator.create(any(), any(), any(), any(), any())).thenReturn(mockService);
+    when(mockCreator.create(any(), any(), any(), any())).thenReturn(mockService);
     when(mockService.startService()).thenReturn(789);
     EmbeddedTimelineService service1 = EmbeddedTimelineService.getOrStartEmbeddedTimelineService(engineContext, null, writeConfig1, mockCreator);
 
@@ -133,7 +144,7 @@ public class TestEmbeddedTimelineService extends HoodieCommonTestHarness {
         .build();
     EmbeddedTimelineService.TimelineServiceCreator mockCreator2 = Mockito.mock(EmbeddedTimelineService.TimelineServiceCreator.class);
     TimelineService mockService2 = Mockito.mock(TimelineService.class);
-    when(mockCreator2.create(any(), any(), any(), any(), any())).thenReturn(mockService2);
+    when(mockCreator2.create(any(), any(), any(), any())).thenReturn(mockService2);
     when(mockService2.startService()).thenReturn(987);
     EmbeddedTimelineService service2 = EmbeddedTimelineService.getOrStartEmbeddedTimelineService(engineContext, null, writeConfig2, mockCreator2);
     assertNotSame(service1, service2);
@@ -150,7 +161,7 @@ public class TestEmbeddedTimelineService extends HoodieCommonTestHarness {
 
   @Test
   public void embeddedTimelineServerIsNotReusedAfterStopped() throws Exception {
-    HoodieEngineContext engineContext = new HoodieLocalEngineContext(new Configuration());
+    HoodieEngineContext engineContext = new HoodieLocalEngineContext(getDefaultStorageConf());
     HoodieWriteConfig writeConfig1 = HoodieWriteConfig.newBuilder()
         .withPath(tempDir.resolve("table1").toString())
         .withEmbeddedTimelineServerEnabled(true)
@@ -158,7 +169,7 @@ public class TestEmbeddedTimelineService extends HoodieCommonTestHarness {
         .build();
     EmbeddedTimelineService.TimelineServiceCreator mockCreator = Mockito.mock(EmbeddedTimelineService.TimelineServiceCreator.class);
     TimelineService mockService = Mockito.mock(TimelineService.class);
-    when(mockCreator.create(any(), any(), any(), any(), any())).thenReturn(mockService);
+    when(mockCreator.create(any(), any(), any(), any())).thenReturn(mockService);
     when(mockService.startService()).thenReturn(555);
     EmbeddedTimelineService service1 = EmbeddedTimelineService.getOrStartEmbeddedTimelineService(engineContext, null, writeConfig1, mockCreator);
 
@@ -171,7 +182,7 @@ public class TestEmbeddedTimelineService extends HoodieCommonTestHarness {
         .build();
     EmbeddedTimelineService.TimelineServiceCreator mockCreator2 = Mockito.mock(EmbeddedTimelineService.TimelineServiceCreator.class);
     TimelineService mockService2 = Mockito.mock(TimelineService.class);
-    when(mockCreator2.create(any(), any(), any(), any(), any())).thenReturn(mockService2);
+    when(mockCreator2.create(any(), any(), any(), any())).thenReturn(mockService2);
     when(mockService2.startService()).thenReturn(111);
     EmbeddedTimelineService service2 = EmbeddedTimelineService.getOrStartEmbeddedTimelineService(engineContext, null, writeConfig2, mockCreator2);
     // a new service will be started since the original was shutdown already

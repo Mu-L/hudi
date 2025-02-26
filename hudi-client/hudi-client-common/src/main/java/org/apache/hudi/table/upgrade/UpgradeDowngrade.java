@@ -28,9 +28,8 @@ import org.apache.hudi.config.HoodieWriteConfig;
 import org.apache.hudi.exception.HoodieUpgradeDowngradeException;
 import org.apache.hudi.metadata.HoodieMetadataWriteUtils;
 import org.apache.hudi.metadata.HoodieTableMetadata;
+import org.apache.hudi.storage.StoragePath;
 
-import org.apache.hadoop.fs.FileSystem;
-import org.apache.hadoop.fs.Path;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
@@ -49,9 +48,6 @@ public class UpgradeDowngrade {
   private HoodieTableMetaClient metaClient;
   protected HoodieWriteConfig config;
   protected HoodieEngineContext context;
-  private transient FileSystem fs;
-  private Path updatedPropsFilePath;
-  private Path propsFilePath;
 
   public UpgradeDowngrade(
       HoodieTableMetaClient metaClient, HoodieWriteConfig config, HoodieEngineContext context,
@@ -59,16 +55,29 @@ public class UpgradeDowngrade {
     this.metaClient = metaClient;
     this.config = config;
     this.context = context;
-    this.fs = metaClient.getFs();
-    this.updatedPropsFilePath = new Path(metaClient.getMetaPath(), HOODIE_UPDATED_PROPERTY_FILE);
-    this.propsFilePath = new Path(metaClient.getMetaPath(), HoodieTableConfig.HOODIE_PROPERTIES_FILE);
     this.upgradeDowngradeHelper = upgradeDowngradeHelper;
   }
 
-  public boolean needsUpgradeOrDowngrade(HoodieTableVersion toVersion) {
-    HoodieTableVersion fromVersion = metaClient.getTableConfig().getTableVersion();
-    // Ensure versions are same
-    return toVersion.versionCode() != fromVersion.versionCode();
+  public static boolean needsUpgradeOrDowngrade(HoodieTableMetaClient metaClient, HoodieWriteConfig config, HoodieTableVersion toWriteVersion) {
+    HoodieTableVersion fromTableVersion = metaClient.getTableConfig().getTableVersion();
+    // If table version is less than SIX, then we need to upgrade to SIX first before upgrading to any other version, irrespective of autoUpgrade flag
+    if (fromTableVersion.versionCode() < HoodieTableVersion.SIX.versionCode() && toWriteVersion.versionCode() >= HoodieTableVersion.EIGHT.versionCode()) {
+      throw new HoodieUpgradeDowngradeException(
+          String.format("Please upgrade table from version %s to %s before upgrading to version %s.", fromTableVersion, HoodieTableVersion.SIX.versionCode(), toWriteVersion));
+    }
+    // If autoUpgrade is disabled and metadata is enabled, and table version is SIX or SEVEN, while toWriteVersion is EIGHT or greater, then we should disable metadata first
+    if (!config.autoUpgrade() && metaClient.getTableConfig().isMetadataTableAvailable()
+        && (fromTableVersion == HoodieTableVersion.SIX || fromTableVersion == HoodieTableVersion.SEVEN) && toWriteVersion.versionCode() >= HoodieTableVersion.EIGHT.versionCode()) {
+      throw new HoodieUpgradeDowngradeException(
+          String.format("Please disable metadata table before upgrading from version %s to %s.", fromTableVersion, toWriteVersion));
+    }
+
+    // allow upgrades/downgrades otherwise.
+    return toWriteVersion.versionCode() != fromTableVersion.versionCode();
+  }
+
+  public boolean needsUpgradeOrDowngrade(HoodieTableVersion toWriteVersion) {
+    return needsUpgradeOrDowngrade(metaClient, config, toWriteVersion);
   }
 
   /**
@@ -111,11 +120,11 @@ public class UpgradeDowngrade {
     // Change metadata table version automatically
     if (toVersion.versionCode() >= HoodieTableVersion.FOUR.versionCode()) {
       String metadataTablePath = HoodieTableMetadata.getMetadataTableBasePath(
-          metaClient.getBasePathV2().toString());
+          metaClient.getBasePath().toString());
       try {
-        if (metaClient.getFs().exists(new Path(metadataTablePath))) {
+        if (metaClient.getStorage().exists(new StoragePath(metadataTablePath))) {
           HoodieTableMetaClient mdtMetaClient = HoodieTableMetaClient.builder()
-              .setConf(metaClient.getHadoopConf()).setBasePath(metadataTablePath).build();
+              .setConf(metaClient.getStorageConf().newInstance()).setBasePath(metadataTablePath).build();
           HoodieWriteConfig mdtWriteConfig = HoodieMetadataWriteUtils.createMetadataWriteConfig(
               config, HoodieFailedWritesCleaningPolicy.EAGER);
           new UpgradeDowngrade(mdtMetaClient, mdtWriteConfig, context, upgradeDowngradeHelper)
@@ -139,27 +148,34 @@ public class UpgradeDowngrade {
     if (fromVersion.versionCode() < toVersion.versionCode()) {
       // upgrade
       while (fromVersion.versionCode() < toVersion.versionCode()) {
-        HoodieTableVersion nextVersion = HoodieTableVersion.versionFromCode(fromVersion.versionCode() + 1);
+        HoodieTableVersion nextVersion = HoodieTableVersion.fromVersionCode(fromVersion.versionCode() + 1);
         tableProps.putAll(upgrade(fromVersion, nextVersion, instantTime));
         fromVersion = nextVersion;
       }
     } else {
       // downgrade
       while (fromVersion.versionCode() > toVersion.versionCode()) {
-        HoodieTableVersion prevVersion = HoodieTableVersion.versionFromCode(fromVersion.versionCode() - 1);
+        HoodieTableVersion prevVersion = HoodieTableVersion.fromVersionCode(fromVersion.versionCode() - 1);
         tableProps.putAll(downgrade(fromVersion, prevVersion, instantTime));
         fromVersion = prevVersion;
       }
     }
     // Reload the meta client to get the latest table config (which could have been updated due to metadata table)
-    metaClient = HoodieTableMetaClient.reload(metaClient);
+    if (metaClient.getTableConfig().isMetadataTableAvailable()) {
+      metaClient = HoodieTableMetaClient.reload(metaClient);
+    }
     // Write out the current version in hoodie.properties.updated file
     for (Map.Entry<ConfigProperty, String> entry : tableProps.entrySet()) {
       metaClient.getTableConfig().setValue(entry.getKey(), entry.getValue());
     }
-    metaClient.getTableConfig().setTableVersion(toVersion);
+    // user could have disabled auto upgrade (probably to deploy the new binary only),
+    // in which case, we should not update the table version
+    if (config.autoUpgrade()) {
+      metaClient.getTableConfig().setTableVersion(toVersion);
+    }
 
-    HoodieTableConfig.update(metaClient.getFs(), new Path(metaClient.getMetaPath()), metaClient.getTableConfig().getProps());
+    HoodieTableConfig.update(metaClient.getStorage(),
+        metaClient.getMetaPath(), metaClient.getTableConfig().getProps());
   }
 
   protected Map<ConfigProperty, String> upgrade(HoodieTableVersion fromVersion, HoodieTableVersion toVersion, String instantTime) {
@@ -175,6 +191,10 @@ public class UpgradeDowngrade {
       return new FourToFiveUpgradeHandler().upgrade(config, context, instantTime, upgradeDowngradeHelper);
     } else if (fromVersion == HoodieTableVersion.FIVE && toVersion == HoodieTableVersion.SIX) {
       return new FiveToSixUpgradeHandler().upgrade(config, context, instantTime, upgradeDowngradeHelper);
+    } else if (fromVersion == HoodieTableVersion.SIX && toVersion == HoodieTableVersion.SEVEN) {
+      return new SixToSevenUpgradeHandler().upgrade(config, context, instantTime, upgradeDowngradeHelper);
+    } else if (fromVersion == HoodieTableVersion.SEVEN && toVersion == HoodieTableVersion.EIGHT) {
+      return new SevenToEightUpgradeHandler().upgrade(config, context, instantTime, upgradeDowngradeHelper);
     } else {
       throw new HoodieUpgradeDowngradeException(fromVersion.versionCode(), toVersion.versionCode(), true);
     }
@@ -193,6 +213,10 @@ public class UpgradeDowngrade {
       return new FiveToFourDowngradeHandler().downgrade(config, context, instantTime, upgradeDowngradeHelper);
     } else if (fromVersion == HoodieTableVersion.SIX && toVersion == HoodieTableVersion.FIVE) {
       return new SixToFiveDowngradeHandler().downgrade(config, context, instantTime, upgradeDowngradeHelper);
+    } else if (fromVersion == HoodieTableVersion.SEVEN && toVersion == HoodieTableVersion.SIX) {
+      return new SevenToSixDowngradeHandler().downgrade(config, context, instantTime, upgradeDowngradeHelper);
+    } else if (fromVersion == HoodieTableVersion.EIGHT && toVersion == HoodieTableVersion.SEVEN) {
+      return new EightToSevenDowngradeHandler().downgrade(config, context, instantTime, upgradeDowngradeHelper);
     } else {
       throw new HoodieUpgradeDowngradeException(fromVersion.versionCode(), toVersion.versionCode(), false);
     }

@@ -18,9 +18,10 @@
 
 package org.apache.hudi.sink.bucket;
 
-import org.apache.hudi.common.model.HoodieKey;
-import org.apache.hudi.common.model.HoodieRecord;
+import org.apache.hudi.client.model.HoodieFlinkInternalRow;
 import org.apache.hudi.common.model.HoodieRecordLocation;
+import org.apache.hudi.common.util.Functions;
+import org.apache.hudi.common.util.hash.BucketIndexUtil;
 import org.apache.hudi.configuration.FlinkOptions;
 import org.apache.hudi.configuration.OptionsResolver;
 import org.apache.hudi.index.bucket.BucketIdentifier;
@@ -29,6 +30,7 @@ import org.apache.hudi.sink.StreamWriteFunction;
 import org.apache.flink.configuration.Configuration;
 import org.apache.flink.runtime.state.FunctionInitializationContext;
 import org.apache.flink.streaming.api.functions.ProcessFunction;
+import org.apache.flink.table.types.logical.RowType;
 import org.apache.flink.util.Collector;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
@@ -45,10 +47,8 @@ import java.util.Set;
  * <p>The task holds a fresh new local index: {(partition + bucket number) &rarr fileId} mapping, this index
  * is used for deciding whether the incoming records in an UPDATE or INSERT.
  * The index is local because different partition paths have separate items in the index.
- *
- * @param <I> the input type
  */
-public class BucketStreamWriteFunction<I> extends StreamWriteFunction<I> {
+public class BucketStreamWriteFunction extends StreamWriteFunction {
 
   private static final Logger LOG = LoggerFactory.getLogger(BucketStreamWriteFunction.class);
 
@@ -74,12 +74,22 @@ public class BucketStreamWriteFunction<I> extends StreamWriteFunction<I> {
   private Set<String> incBucketIndex;
 
   /**
+   * Functions for calculating the task partition to dispatch.
+   */
+  private Functions.Function2<String, Integer, Integer> partitionIndexFunc;
+
+  /**
+   * To prevent strings compare for each record, define this only during open()
+   */
+  private boolean isInsertOverwrite;
+
+  /**
    * Constructs a BucketStreamWriteFunction.
    *
    * @param config The config options
    */
-  public BucketStreamWriteFunction(Configuration config) {
-    super(config);
+  public BucketStreamWriteFunction(Configuration config, RowType rowType) {
+    super(config, rowType);
   }
 
   @Override
@@ -92,6 +102,8 @@ public class BucketStreamWriteFunction<I> extends StreamWriteFunction<I> {
     this.parallelism = getRuntimeContext().getNumberOfParallelSubtasks();
     this.bucketIndex = new HashMap<>();
     this.incBucketIndex = new HashSet<>();
+    this.partitionIndexFunc = BucketIndexUtil.getPartitionIndexFunc(bucketNum, parallelism);
+    this.isInsertOverwrite = OptionsResolver.isInsertOverwrite(config);
   }
 
   @Override
@@ -106,41 +118,45 @@ public class BucketStreamWriteFunction<I> extends StreamWriteFunction<I> {
   }
 
   @Override
-  public void processElement(I i, ProcessFunction<I, Object>.Context context, Collector<Object> collector) throws Exception {
-    HoodieRecord<?> record = (HoodieRecord<?>) i;
-    final HoodieKey hoodieKey = record.getKey();
-    final String partition = hoodieKey.getPartitionPath();
-    final HoodieRecordLocation location;
+  public void processElement(HoodieFlinkInternalRow record,
+                             ProcessFunction<HoodieFlinkInternalRow, Object>.Context context,
+                             Collector<Object> collector) throws Exception {
+    defineRecordLocation(record);
+    bufferRecord(record);
+  }
 
-    bootstrapIndexIfNeed(partition);
+  private void defineRecordLocation(HoodieFlinkInternalRow record) {
+    final String partition = record.getPartitionPath();
+    // for insert overwrite operation skip `bucketIndex` loading
+    if (!isInsertOverwrite) {
+      bootstrapIndexIfNeed(partition);
+    }
     Map<Integer, String> bucketToFileId = bucketIndex.computeIfAbsent(partition, p -> new HashMap<>());
-    final int bucketNum = BucketIdentifier.getBucketId(hoodieKey, indexKeyFields, this.bucketNum);
+    final int bucketNum = BucketIdentifier.getBucketId(record.getRecordKey(), indexKeyFields, this.bucketNum);
     final String bucketId = partition + "/" + bucketNum;
 
+    final HoodieRecordLocation location;
     if (incBucketIndex.contains(bucketId)) {
-      location = new HoodieRecordLocation("I", bucketToFileId.get(bucketNum));
+      record.setInstantTime("I");
+      record.setFileId(bucketToFileId.get(bucketNum));
     } else if (bucketToFileId.containsKey(bucketNum)) {
-      location = new HoodieRecordLocation("U", bucketToFileId.get(bucketNum));
+      record.setInstantTime("U");
+      record.setFileId(bucketToFileId.get(bucketNum));
     } else {
-      String newFileId = BucketIdentifier.newBucketFileIdPrefix(bucketNum, isNonBlockingConcurrencyControl);
-      location = new HoodieRecordLocation("I", newFileId);
+      String newFileId = isNonBlockingConcurrencyControl ? BucketIdentifier.newBucketFileIdForNBCC(bucketNum) : BucketIdentifier.newBucketFileIdPrefix(bucketNum);
+      record.setInstantTime("I");
+      record.setFileId(newFileId);
       bucketToFileId.put(bucketNum, newFileId);
       incBucketIndex.add(bucketId);
     }
-    record.unseal();
-    record.setCurrentLocation(location);
-    record.seal();
-    bufferRecord(record);
   }
 
   /**
    * Determine whether the current fileID belongs to the current task.
-   * (partition + curBucket) % numPartitions == this taskID belongs to this task.
+   * partitionIndex == this taskID belongs to this task.
    */
   public boolean isBucketToLoad(int bucketNumber, String partition) {
-    final int partitionIndex = (partition.hashCode() & Integer.MAX_VALUE) % parallelism;
-    int globalIndex = partitionIndex + bucketNumber;
-    return BucketIdentifier.mod(globalIndex, parallelism)  == taskID;
+    return this.partitionIndexFunc.apply(partition, bucketNumber) == taskID;
   }
 
   /**
@@ -148,15 +164,11 @@ public class BucketStreamWriteFunction<I> extends StreamWriteFunction<I> {
    * This is a required operation for each restart to avoid having duplicate file ids for one bucket.
    */
   private void bootstrapIndexIfNeed(String partition) {
-    if (OptionsResolver.isInsertOverwrite(config)) {
-      // skips the index loading for insert overwrite operation.
-      return;
-    }
     if (bucketIndex.containsKey(partition)) {
       return;
     }
-    LOG.info(String.format("Loading Hoodie Table %s, with path %s", this.metaClient.getTableConfig().getTableName(),
-        this.metaClient.getBasePath() + "/" + partition));
+    LOG.info("Loading Hoodie Table {}, with path {}/{}", this.metaClient.getTableConfig().getTableName(),
+        this.metaClient.getBasePath(), partition);
 
     // Load existing fileID belongs to this task
     Map<Integer, String> bucketToFileIDMap = new HashMap<>();

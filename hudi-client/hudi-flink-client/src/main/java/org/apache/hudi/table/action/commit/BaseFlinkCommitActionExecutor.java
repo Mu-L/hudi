@@ -19,14 +19,16 @@
 package org.apache.hudi.table.action.commit;
 
 import org.apache.hudi.client.WriteStatus;
-import org.apache.hudi.common.data.HoodieListData;
 import org.apache.hudi.common.engine.HoodieEngineContext;
 import org.apache.hudi.common.model.HoodieKey;
 import org.apache.hudi.common.model.HoodieRecord;
 import org.apache.hudi.common.model.WriteOperationType;
+import org.apache.hudi.common.table.HoodieTableMetaClient;
 import org.apache.hudi.common.util.CommitUtils;
+import org.apache.hudi.common.util.HoodieTimer;
 import org.apache.hudi.common.util.Option;
 import org.apache.hudi.config.HoodieWriteConfig;
+import org.apache.hudi.exception.HoodieNotSupportedException;
 import org.apache.hudi.exception.HoodieUpsertException;
 import org.apache.hudi.execution.FlinkLazyInsertIterable;
 import org.apache.hudi.io.ExplicitWriteHandleFactory;
@@ -89,6 +91,11 @@ public abstract class BaseFlinkCommitActionExecutor<T> extends
 
   @Override
   public HoodieWriteMetadata<List<WriteStatus>> execute(List<HoodieRecord<T>> inputRecords) {
+    return execute(inputRecords, Option.empty());
+  }
+
+  @Override
+  public HoodieWriteMetadata<List<WriteStatus>> execute(List<HoodieRecord<T>> inputRecords, Option<HoodieTimer> sourceReadAndIndexTimer) {
     HoodieWriteMetadata<List<WriteStatus>> result = new HoodieWriteMetadata<>();
 
     List<WriteStatus> writeStatuses = new LinkedList<>();
@@ -123,8 +130,7 @@ public abstract class BaseFlinkCommitActionExecutor<T> extends
 
   @Override
   protected void commit(HoodieWriteMetadata<List<WriteStatus>> result) {
-    commit(HoodieListData.eager(result.getWriteStatuses()), result,
-        result.getWriteStatuses().stream().map(WriteStatus::getStat).collect(Collectors.toList()));
+    commit(result, result.getWriteStatuses().stream().map(WriteStatus::getStat).collect(Collectors.toList()));
   }
 
   protected void setCommitMetadata(HoodieWriteMetadata<List<WriteStatus>> result) {
@@ -184,20 +190,8 @@ public abstract class BaseFlinkCommitActionExecutor<T> extends
 
   protected Iterator<List<WriteStatus>> handleUpdateInternal(HoodieMergeHandle<?, ?, ?, ?> upsertHandle, String fileId)
       throws IOException {
-    if (upsertHandle.getOldFilePath() == null) {
-      throw new HoodieUpsertException(
-          "Error in finding the old file path at commit " + instantTime + " for fileId: " + fileId);
-    } else {
-      HoodieMergeHelper.newInstance().runMerge(table, upsertHandle);
-    }
-
-    // TODO(vc): This needs to be revisited
-    if (upsertHandle.getPartitionPath() == null) {
-      LOG.info("Upsert Handle has partition path as null " + upsertHandle.getOldFilePath() + ", "
-          + upsertHandle.writeStatuses());
-    }
-
-    return Collections.singletonList(upsertHandle.writeStatuses()).iterator();
+    table.runMerge(upsertHandle, instantTime, fileId);
+    return upsertHandle.getWriteStatusesAsIterator();
   }
 
   @Override
@@ -210,5 +204,10 @@ public abstract class BaseFlinkCommitActionExecutor<T> extends
     }
     return new FlinkLazyInsertIterable<>(recordItr, true, config, instantTime, table, idPfx,
         taskContextSupplier, new ExplicitWriteHandleFactory<>(writeHandle));
+  }
+
+  @Override
+  protected void updateColumnsToIndexForColumnStats(HoodieTableMetaClient metaClient, List<String> columnsToIndex) {
+    throw new HoodieNotSupportedException("Col stats with flink is not yet supported");
   }
 }

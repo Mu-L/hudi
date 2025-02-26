@@ -18,14 +18,17 @@
 
 package org.apache.hudi
 
-import java.nio.ByteBuffer
-import java.util.Objects
+import org.apache.hudi.internal.schema.HoodieSchemaException
+
 import org.apache.avro.Schema
 import org.apache.avro.generic.GenericData
 import org.apache.spark.sql.catalyst.InternalRow
 import org.apache.spark.sql.catalyst.util.{ArrayData, MapData}
 import org.apache.spark.sql.types.{ArrayType, BinaryType, DataType, DataTypes, MapType, StringType, StructField, StructType}
 import org.scalatest.{FunSuite, Matchers}
+
+import java.nio.ByteBuffer
+import java.util.Objects
 
 class TestAvroConversionUtils extends FunSuite with Matchers {
 
@@ -443,5 +446,14 @@ class TestAvroConversionUtils extends FunSuite with Matchers {
 
   private def checkNull(left: Any, right: Any): Boolean = {
     (left == null && right != null) || (left == null && right != null)
+  }
+
+  test("convert struct type with duplicate column names") {
+    val struct = new StructType().add("id", DataTypes.LongType, true)
+      .add("name", DataTypes.StringType, true)
+      .add("name", DataTypes.StringType, true)
+    the[HoodieSchemaException] thrownBy {
+      AvroConversionUtils.convertStructTypeToAvroSchema(struct, "SchemaName", "SchemaNS")
+    } should have message "Duplicate field name in record SchemaNS.SchemaName: name type:UNION pos:2 and name type:UNION pos:1."
   }
 }

@@ -74,9 +74,9 @@ class TestSparkRDDWriteClient extends SparkClientFunctionalTestHarness {
   public void testWriteClientAndTableServiceClientWithTimelineServer(
       boolean enableEmbeddedTimelineServer, boolean passInTimelineServer) throws IOException {
     HoodieTableMetaClient metaClient =
-        getHoodieMetaClient(hadoopConf(), URI.create(basePath()).getPath(), new Properties());
+        getHoodieMetaClient(storageConf(), URI.create(basePath()).getPath(), new Properties());
     HoodieWriteConfig writeConfig = getConfigBuilder(true)
-        .withPath(metaClient.getBasePathV2().toString())
+        .withPath(metaClient.getBasePath())
         .withEmbeddedTimelineServerEnabled(enableEmbeddedTimelineServer)
         .withFileSystemViewConfig(FileSystemViewStorageConfig.newBuilder()
             .withRemoteServerPort(incrementTimelineServicePortToUse()).build())
@@ -85,7 +85,7 @@ class TestSparkRDDWriteClient extends SparkClientFunctionalTestHarness {
     SparkRDDWriteClient writeClient;
     if (passInTimelineServer) {
       EmbeddedTimelineService timelineService = EmbeddedTimelineService.getOrStartEmbeddedTimelineService(context(), null, writeConfig);
-      writeConfig.setViewStorageConfig(timelineService.getRemoteFileSystemViewConfig());
+      writeConfig.setViewStorageConfig(timelineService.getRemoteFileSystemViewConfig(writeConfig));
       writeClient = new SparkRDDWriteClient(context(), writeConfig, Option.of(timelineService));
       // Both the write client and the table service client should use the same passed-in
       // timeline server instance.
@@ -112,9 +112,9 @@ class TestSparkRDDWriteClient extends SparkClientFunctionalTestHarness {
   @MethodSource
   void testWriteClientReleaseResourcesShouldOnlyUnpersistRelevantRdds(
       HoodieTableType tableType, boolean shouldReleaseResource, boolean metadataTableEnable) throws IOException {
-    final HoodieTableMetaClient metaClient = getHoodieMetaClient(hadoopConf(), URI.create(basePath()).getPath(), tableType, new Properties());
+    final HoodieTableMetaClient metaClient = getHoodieMetaClient(storageConf(), URI.create(basePath()).getPath(), tableType, new Properties());
     final HoodieWriteConfig writeConfig = getConfigBuilder(true)
-        .withPath(metaClient.getBasePathV2().toString())
+        .withPath(metaClient.getBasePath())
         .withAutoCommit(false)
         .withReleaseResourceEnabled(shouldReleaseResource)
         .withMetadataConfig(HoodieMetadataConfig.newBuilder().enable(metadataTableEnable).build())
@@ -140,7 +140,7 @@ class TestSparkRDDWriteClient extends SparkClientFunctionalTestHarness {
     String metadataTableBasePath = HoodieTableMetadata.getMetadataTableBasePath(writeConfig.getBasePath());
     List<Integer> metadataTableCacheIds0 = context().getCachedDataIds(HoodieDataCacheKey.of(metadataTableBasePath, instant0));
     List<Integer> metadataTableCacheIds1 = context().getCachedDataIds(HoodieDataCacheKey.of(metadataTableBasePath, instant1));
-    writeClient.commitStats(instant1, context().parallelize(writeStatuses, 1), writeStatuses.stream().map(WriteStatus::getStat).collect(Collectors.toList()),
+    writeClient.commitStats(instant1, writeStatuses.stream().map(WriteStatus::getStat).collect(Collectors.toList()),
         Option.empty(), metaClient.getCommitActionType());
     writeClient.close();
 

@@ -21,9 +21,9 @@ package org.apache.hudi.timeline.service.handlers.marker;
 import org.apache.hudi.common.conflict.detection.TimelineServerBasedDetectionStrategy;
 import org.apache.hudi.common.table.timeline.HoodieInstant;
 import org.apache.hudi.exception.HoodieEarlyConflictDetectionException;
+import org.apache.hudi.storage.HoodieStorage;
 import org.apache.hudi.timeline.service.handlers.MarkerHandler;
 
-import org.apache.hadoop.fs.FileSystem;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
@@ -43,7 +43,7 @@ public class AsyncTimelineServerBasedDetectionStrategy extends TimelineServerBas
 
   private static final Logger LOG = LoggerFactory.getLogger(AsyncTimelineServerBasedDetectionStrategy.class);
 
-  private AtomicBoolean hasConflict = new AtomicBoolean(false);
+  private final AtomicBoolean hasConflict = new AtomicBoolean(false);
   private ScheduledExecutorService asyncDetectorExecutor;
 
   public AsyncTimelineServerBasedDetectionStrategy(String basePath, String markerDir, String markerName, Boolean checkCommitConflict) {
@@ -63,7 +63,7 @@ public class AsyncTimelineServerBasedDetectionStrategy extends TimelineServerBas
   @Override
   public void startAsyncDetection(Long initialDelayMs, Long periodMs, String markerDir,
                                   String basePath, Long maxAllowableHeartbeatIntervalInMs,
-                                  FileSystem fileSystem, Object markerHandler,
+                                  HoodieStorage storage, Object markerHandler,
                                   Set<HoodieInstant> completedCommits) {
     if (asyncDetectorExecutor != null) {
       asyncDetectorExecutor.shutdown();
@@ -73,7 +73,7 @@ public class AsyncTimelineServerBasedDetectionStrategy extends TimelineServerBas
     asyncDetectorExecutor.scheduleAtFixedRate(
         new MarkerBasedEarlyConflictDetectionRunnable(
             hasConflict, (MarkerHandler) markerHandler, markerDir, basePath,
-            fileSystem, maxAllowableHeartbeatIntervalInMs, completedCommits, checkCommitConflict),
+            storage, maxAllowableHeartbeatIntervalInMs, completedCommits, checkCommitConflict),
         initialDelayMs, periodMs, TimeUnit.MILLISECONDS);
   }
 
@@ -81,6 +81,12 @@ public class AsyncTimelineServerBasedDetectionStrategy extends TimelineServerBas
   public void detectAndResolveConflictIfNecessary() throws HoodieEarlyConflictDetectionException {
     if (hasMarkerConflict()) {
       resolveMarkerConflict(basePath, markerDir, markerName);
+    }
+  }
+
+  public void stop() {
+    if (asyncDetectorExecutor != null) {
+      asyncDetectorExecutor.shutdown();
     }
   }
 }

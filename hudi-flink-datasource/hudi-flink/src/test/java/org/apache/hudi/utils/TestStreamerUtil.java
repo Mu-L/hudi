@@ -20,6 +20,8 @@ package org.apache.hudi.utils;
 
 import org.apache.hudi.common.table.HoodieTableConfig;
 import org.apache.hudi.common.table.HoodieTableMetaClient;
+import org.apache.hudi.common.table.HoodieTableVersion;
+import org.apache.hudi.common.testutils.HoodieTestUtils;
 import org.apache.hudi.common.util.FileIOUtils;
 import org.apache.hudi.configuration.FlinkOptions;
 import org.apache.hudi.configuration.HadoopConfigurations;
@@ -41,6 +43,7 @@ import static org.hamcrest.MatcherAssert.assertThat;
 import static org.junit.jupiter.api.Assertions.assertArrayEquals;
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
+import static org.junit.jupiter.api.Assertions.assertNull;
 import static org.junit.jupiter.api.Assertions.assertThrows;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
@@ -53,33 +56,44 @@ public class TestStreamerUtil {
   File tempFile;
 
   @Test
+  void testInitTableWithSpecificVersion() throws IOException {
+    Configuration conf = TestConfigurations.getDefaultConf(tempFile.getAbsolutePath());
+
+    // Test for partitioned table.
+    conf.set(FlinkOptions.PARTITION_PATH_FIELD, "p0,p1");
+    conf.set(FlinkOptions.WRITE_TABLE_VERSION, HoodieTableVersion.SIX.versionCode());
+    StreamerUtil.initTableIfNotExists(conf);
+
+    // Validate the partition fields & preCombineField in hoodie.properties.
+    HoodieTableMetaClient metaClient1 = HoodieTestUtils.createMetaClient(tempFile.getAbsolutePath());
+    assertArrayEquals(metaClient1.getTableConfig().getPartitionFields().get(), new String[] {"p0", "p1"});
+    assertNull(metaClient1.getTableConfig().getKeyGeneratorClassName());
+    assertEquals(HoodieTableVersion.SIX, metaClient1.getTableConfig().getTableVersion());
+  }
+
+  @Test
   void testInitTableIfNotExists() throws IOException {
     Configuration conf = TestConfigurations.getDefaultConf(tempFile.getAbsolutePath());
 
     // Test for partitioned table.
-    conf.setString(FlinkOptions.PRECOMBINE_FIELD, "ts");
-    conf.setString(FlinkOptions.PARTITION_PATH_FIELD, "p0,p1");
+    conf.set(FlinkOptions.PRECOMBINE_FIELD, "ts");
+    conf.set(FlinkOptions.PARTITION_PATH_FIELD, "p0,p1");
     StreamerUtil.initTableIfNotExists(conf);
 
     // Validate the partition fields & preCombineField in hoodie.properties.
-    HoodieTableMetaClient metaClient1 = HoodieTableMetaClient.builder()
-        .setBasePath(tempFile.getAbsolutePath())
-        .setConf(new org.apache.hadoop.conf.Configuration())
-        .build();
+    HoodieTableMetaClient metaClient1 = HoodieTestUtils.createMetaClient(tempFile.getAbsolutePath());
     assertTrue(metaClient1.getTableConfig().getPartitionFields().isPresent(),
         "Missing partition columns in the hoodie.properties.");
     assertArrayEquals(metaClient1.getTableConfig().getPartitionFields().get(), new String[] {"p0", "p1"});
     assertEquals(metaClient1.getTableConfig().getPreCombineField(), "ts");
     assertEquals(metaClient1.getTableConfig().getKeyGeneratorClassName(), SimpleAvroKeyGenerator.class.getName());
+    assertEquals(HoodieTableVersion.EIGHT, metaClient1.getTableConfig().getTableVersion());
 
     // Test for non-partitioned table.
     conf.removeConfig(FlinkOptions.PARTITION_PATH_FIELD);
     FileIOUtils.deleteDirectory(tempFile);
     StreamerUtil.initTableIfNotExists(conf);
-    HoodieTableMetaClient metaClient2 = HoodieTableMetaClient.builder()
-        .setBasePath(tempFile.getAbsolutePath())
-        .setConf(new org.apache.hadoop.conf.Configuration())
-        .build();
+    HoodieTableMetaClient metaClient2 = HoodieTestUtils.createMetaClient(tempFile.getAbsolutePath());
     assertFalse(metaClient2.getTableConfig().getPartitionFields().isPresent());
     assertEquals(metaClient2.getTableConfig().getKeyGeneratorClassName(), SimpleAvroKeyGenerator.class.getName());
   }

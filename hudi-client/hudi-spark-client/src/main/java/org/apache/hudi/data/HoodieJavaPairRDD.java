@@ -28,9 +28,13 @@ import org.apache.hudi.common.util.Option;
 import org.apache.hudi.common.util.collection.ImmutablePair;
 import org.apache.hudi.common.util.collection.Pair;
 
+import org.apache.spark.Partitioner;
 import org.apache.spark.api.java.JavaPairRDD;
+import org.apache.spark.api.java.Optional;
+import org.apache.spark.sql.internal.SQLConf;
 import org.apache.spark.storage.StorageLevel;
 
+import java.util.Iterator;
 import java.util.List;
 import java.util.Map;
 
@@ -126,6 +130,10 @@ public class HoodieJavaPairRDD<K, V> implements HoodiePairData<K, V> {
     return HoodieJavaPairRDD.of(pairRDDData.mapValues(func::apply));
   }
 
+  public <W> HoodiePairData<K, W> flatMapValues(SerializableFunction<V, Iterator<W>> func) {
+    return HoodieJavaPairRDD.of(pairRDDData.flatMapValues(func::apply));
+  }
+
   @Override
   public <L, W> HoodiePairData<L, W> mapToPair(SerializablePairFunction<Pair<K, V>, L, W> mapToPairFunc) {
     return HoodieJavaPairRDD.of(pairRDDData.mapToPair(pair -> {
@@ -143,7 +151,32 @@ public class HoodieJavaPairRDD<K, V> implements HoodiePairData<K, V> {
   }
 
   @Override
+  public HoodiePairData<K, V> union(HoodiePairData<K, V> other) {
+    return HoodieJavaPairRDD.of(pairRDDData.union(HoodieJavaPairRDD.getJavaPairRDD(other)));
+  }
+
+  @Override
   public List<Pair<K, V>> collectAsList() {
     return pairRDDData.map(t -> Pair.of(t._1, t._2)).collect();
+  }
+
+  @Override
+  public int deduceNumPartitions() {
+    // for source rdd, the partitioner is None
+    final Optional<Partitioner> partitioner = pairRDDData.partitioner();
+    if (partitioner.isPresent()) {
+      int partPartitions = partitioner.get().numPartitions();
+      if (partPartitions > 0) {
+        return partPartitions;
+      }
+    }
+
+    if (SQLConf.get().contains(SQLConf.SHUFFLE_PARTITIONS().key())) {
+      return Integer.parseInt(SQLConf.get().getConfString(SQLConf.SHUFFLE_PARTITIONS().key()));
+    } else if (pairRDDData.context().conf().contains("spark.default.parallelism")) {
+      return pairRDDData.context().defaultParallelism();
+    } else {
+      return pairRDDData.getNumPartitions();
+    }
   }
 }

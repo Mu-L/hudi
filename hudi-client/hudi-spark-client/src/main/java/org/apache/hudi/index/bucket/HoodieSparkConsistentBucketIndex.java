@@ -26,7 +26,6 @@ import org.apache.hudi.common.engine.HoodieEngineContext;
 import org.apache.hudi.common.model.ConsistentHashingNode;
 import org.apache.hudi.common.model.HoodieConsistentHashingMetadata;
 import org.apache.hudi.common.table.timeline.HoodieInstant;
-import org.apache.hudi.common.table.timeline.HoodieTimeline;
 import org.apache.hudi.common.util.ClusteringUtils;
 import org.apache.hudi.common.util.Option;
 import org.apache.hudi.common.util.ValidationUtils;
@@ -65,14 +64,14 @@ public class HoodieSparkConsistentBucketIndex extends HoodieConsistentBucketInde
                                                 String instantTime)
       throws HoodieIndexException {
     HoodieInstant instant = hoodieTable.getMetaClient().getActiveTimeline().findInstantsAfterOrEquals(instantTime, 1).firstInstant().get();
-    ValidationUtils.checkState(instant.getTimestamp().equals(instantTime), "Cannot get the same instant, instantTime: " + instantTime);
-    if (!instant.getAction().equals(HoodieTimeline.REPLACE_COMMIT_ACTION)) {
+    ValidationUtils.checkState(instant.requestedTime().equals(instantTime), "Cannot get the same instant, instantTime: " + instantTime);
+    if (!ClusteringUtils.isClusteringOrReplaceCommitAction(instant.getAction())) {
       return writeStatuses;
     }
 
     // Double-check if it is a clustering operation by trying to obtain the clustering plan
     Option<Pair<HoodieInstant, HoodieClusteringPlan>> instantPlanPair =
-        ClusteringUtils.getClusteringPlan(hoodieTable.getMetaClient(), HoodieTimeline.getReplaceCommitRequestedInstant(instantTime));
+        ClusteringUtils.getClusteringPlan(hoodieTable.getMetaClient(), instant);
     if (!instantPlanPair.isPresent()) {
       return writeStatuses;
     }
@@ -104,7 +103,9 @@ public class HoodieSparkConsistentBucketIndex extends HoodieConsistentBucketInde
           .collect(Collectors.toList());
       HoodieConsistentHashingMetadata newMeta = new HoodieConsistentHashingMetadata(meta.getVersion(), meta.getPartitionPath(),
           instantTime, meta.getNumBuckets(), seqNo + 1, newNodes);
-      ConsistentBucketIndexUtils.saveMetadata(hoodieTable, newMeta, true);
+      if (!ConsistentBucketIndexUtils.saveMetadata(hoodieTable, newMeta)) {
+        throw new HoodieIndexException("Failed to save metadata for partition: " + partition);
+      }
     });
 
     return writeStatuses;

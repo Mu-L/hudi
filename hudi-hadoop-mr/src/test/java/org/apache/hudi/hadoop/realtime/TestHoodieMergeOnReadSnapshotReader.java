@@ -20,6 +20,7 @@ package org.apache.hudi.hadoop.realtime;
 
 import org.apache.hudi.avro.HoodieAvroUtils;
 import org.apache.hudi.common.config.HoodieMemoryConfig;
+import org.apache.hudi.common.config.HoodieReaderConfig;
 import org.apache.hudi.common.model.FileSlice;
 import org.apache.hudi.common.model.HoodieBaseFile;
 import org.apache.hudi.common.model.HoodieCommitMetadata;
@@ -30,18 +31,21 @@ import org.apache.hudi.common.model.WriteOperationType;
 import org.apache.hudi.common.table.log.HoodieLogFormat;
 import org.apache.hudi.common.table.log.block.HoodieLogBlock;
 import org.apache.hudi.common.table.timeline.HoodieTimeline;
-import org.apache.hudi.common.testutils.FileCreateUtils;
+import org.apache.hudi.common.testutils.FileCreateUtilsLegacy;
 import org.apache.hudi.common.testutils.HoodieTestUtils;
 import org.apache.hudi.common.testutils.SchemaTestUtil;
 import org.apache.hudi.common.util.CommitUtils;
 import org.apache.hudi.common.util.Option;
 import org.apache.hudi.common.util.collection.Pair;
 import org.apache.hudi.exception.HoodieException;
+import org.apache.hudi.hadoop.fs.HadoopFSUtils;
 import org.apache.hudi.hadoop.testutils.InputFormatTestUtil;
+import org.apache.hudi.storage.HoodieStorage;
+import org.apache.hudi.storage.StoragePath;
+import org.apache.hudi.storage.hadoop.HoodieHadoopStorage;
 
 import org.apache.avro.Schema;
 import org.apache.hadoop.conf.Configuration;
-import org.apache.hadoop.fs.FileSystem;
 import org.apache.hadoop.fs.Path;
 import org.apache.hadoop.hive.serde.serdeConstants;
 import org.apache.hadoop.mapred.FileInputFormat;
@@ -58,8 +62,8 @@ import java.util.List;
 import java.util.Map;
 import java.util.stream.Collectors;
 
-import static org.apache.hudi.hadoop.fs.HadoopFSUtils.getFs;
-import static org.apache.hudi.common.fs.FSUtils.getRelativePartitionPath;
+import static org.apache.hudi.common.testutils.HoodieTestUtils.COMMIT_METADATA_SER_DE;
+import static org.apache.hudi.hadoop.fs.HadoopFSUtils.getRelativePartitionPath;
 import static org.apache.hudi.hadoop.testutils.InputFormatTestUtil.writeDataBlockToLogFile;
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertTrue;
@@ -72,7 +76,7 @@ public class TestHoodieMergeOnReadSnapshotReader {
       "_hoodie_commit_time,_hoodie_commit_seqno,_hoodie_record_key,_hoodie_partition_path,_hoodie_file_name,field1,field2,name,favorite_number,favorite_color,favorite_movie";
   private static final String COLUMN_TYPES = "string,string,string,string,string,string,string,string,int,string,string";
   private JobConf baseJobConf;
-  private FileSystem fs;
+  private HoodieStorage storage;
   private Configuration hadoopConf;
 
   @TempDir
@@ -80,21 +84,22 @@ public class TestHoodieMergeOnReadSnapshotReader {
 
   @BeforeEach
   public void setUp() {
-    hadoopConf = HoodieTestUtils.getDefaultHadoopConf();
+    hadoopConf = HoodieTestUtils.getDefaultStorageConf().unwrap();
     hadoopConf.set("fs.defaultFS", "file:///");
     hadoopConf.set("fs.file.impl", org.apache.hadoop.fs.LocalFileSystem.class.getName());
     baseJobConf = new JobConf(hadoopConf);
     baseJobConf.set(HoodieMemoryConfig.MAX_DFS_STREAM_BUFFER_SIZE.key(), String.valueOf(1024 * 1024));
     baseJobConf.set(serdeConstants.LIST_COLUMNS, COLUMNS);
     baseJobConf.set(serdeConstants.LIST_COLUMN_TYPES, COLUMN_TYPES);
-    fs = getFs(basePath.toUri().toString(), baseJobConf);
+    baseJobConf.set(HoodieReaderConfig.FILE_GROUP_READER_ENABLED.key(), "false");
+    storage = new HoodieHadoopStorage(HadoopFSUtils.getFs(new StoragePath(basePath.toUri()), baseJobConf));
   }
 
   @AfterEach
   public void tearDown() throws Exception {
-    if (fs != null) {
-      fs.delete(new Path(basePath.toString()), true);
-      fs.close();
+    if (storage != null) {
+      storage.deleteDirectory(new StoragePath(basePath.toUri()));
+      storage.close();
     }
   }
 
@@ -111,7 +116,7 @@ public class TestHoodieMergeOnReadSnapshotReader {
   private void testReaderInternal(boolean partitioned, HoodieLogBlock.HoodieLogBlockType logBlockType) throws Exception {
     // initial commit
     Schema schema = HoodieAvroUtils.addMetadataFields(SchemaTestUtil.getEvolvedSchema());
-    HoodieTestUtils.init(hadoopConf, basePath.toString(), HoodieTableType.MERGE_ON_READ);
+    HoodieTestUtils.init(HadoopFSUtils.getStorageConf(hadoopConf), basePath.toString(), HoodieTableType.MERGE_ON_READ);
     String baseInstant = "100";
     File partitionDir = partitioned ? InputFormatTestUtil.prepareParquetTable(basePath, schema, 1, TOTAL_RECORDS, baseInstant,
         HoodieTableType.MERGE_ON_READ)
@@ -120,7 +125,7 @@ public class TestHoodieMergeOnReadSnapshotReader {
 
     HoodieCommitMetadata commitMetadata = CommitUtils.buildMetadata(Collections.emptyList(), Collections.emptyMap(), Option.empty(), WriteOperationType.UPSERT,
         schema.toString(), HoodieTimeline.DELTA_COMMIT_ACTION);
-    FileCreateUtils.createDeltaCommit(basePath.toString(), baseInstant, commitMetadata);
+    FileCreateUtilsLegacy.createDeltaCommit(COMMIT_METADATA_SER_DE, basePath.toString(), baseInstant, commitMetadata);
     // Add the paths
     FileInputFormat.setInputPaths(baseJobConf, partitionDir.getPath());
 
@@ -132,7 +137,7 @@ public class TestHoodieMergeOnReadSnapshotReader {
     FileSlice fileSlice = new FileSlice(
         new HoodieFileGroupId(partitionPath, FILE_ID),
         baseInstant,
-        new HoodieBaseFile(fs.getFileStatus(new Path(baseFilePath))),
+        new HoodieBaseFile(storage.getPathInfo(new StoragePath(baseFilePath))),
         new ArrayList<>());
     logVersionsWithAction.forEach(logVersionWithAction -> {
       try {
@@ -147,7 +152,7 @@ public class TestHoodieMergeOnReadSnapshotReader {
 
         HoodieLogFormat.Writer writer = writeDataBlockToLogFile(
             partitionDir,
-            fs,
+            storage,
             schema,
             FILE_ID,
             baseInstant,
@@ -159,7 +164,7 @@ public class TestHoodieMergeOnReadSnapshotReader {
         long size = writer.getCurrentSize();
         writer.close();
         assertTrue(size > 0, "block - size should be > 0");
-        FileCreateUtils.createDeltaCommit(basePath.toString(), instantTime, commitMetadata);
+        FileCreateUtilsLegacy.createDeltaCommit(COMMIT_METADATA_SER_DE, basePath.toString(), instantTime, commitMetadata);
         fileSlice.addLogFile(writer.getLogFile());
 
         HoodieMergeOnReadSnapshotReader snapshotReader = new HoodieMergeOnReadSnapshotReader(

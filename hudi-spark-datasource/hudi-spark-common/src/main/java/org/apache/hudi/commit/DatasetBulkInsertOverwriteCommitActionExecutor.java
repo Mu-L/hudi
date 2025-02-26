@@ -31,6 +31,7 @@ import org.apache.hudi.common.util.collection.Pair;
 import org.apache.hudi.config.HoodieInternalConfig;
 import org.apache.hudi.config.HoodieWriteConfig;
 import org.apache.hudi.data.HoodieJavaPairRDD;
+
 import org.apache.spark.sql.Dataset;
 import org.apache.spark.sql.Row;
 
@@ -49,9 +50,10 @@ public class DatasetBulkInsertOverwriteCommitActionExecutor extends BaseDatasetB
 
   @Override
   protected Option<HoodieData<WriteStatus>> doExecute(Dataset<Row> records, boolean arePartitionRecordsSorted) {
-    table.getActiveTimeline().transitionRequestedToInflight(new HoodieInstant(HoodieInstant.State.REQUESTED, getCommitActionType(), instantTime), Option.empty());
+    table.getActiveTimeline().transitionRequestedToInflight(table.getMetaClient().createNewInstant(HoodieInstant.State.REQUESTED,
+        getCommitActionType(), instantTime), Option.empty());
     return Option.of(HoodieDatasetBulkInsertHelper
-        .bulkInsert(records, instantTime, table, writeConfig, arePartitionRecordsSorted, false));
+        .bulkInsert(records, instantTime, table, writeConfig, arePartitionRecordsSorted, false, getWriteOperationType()));
   }
 
   @Override

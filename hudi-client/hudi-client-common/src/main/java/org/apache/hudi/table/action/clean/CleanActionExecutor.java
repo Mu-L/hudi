@@ -36,11 +36,11 @@ import org.apache.hudi.common.util.collection.Pair;
 import org.apache.hudi.config.HoodieWriteConfig;
 import org.apache.hudi.exception.HoodieIOException;
 import org.apache.hudi.internal.schema.io.FileBasedInternalSchemaStorageManager;
+import org.apache.hudi.storage.HoodieStorage;
+import org.apache.hudi.storage.StoragePath;
 import org.apache.hudi.table.HoodieTable;
 import org.apache.hudi.table.action.BaseActionExecutor;
 
-import org.apache.hadoop.fs.FileSystem;
-import org.apache.hadoop.fs.Path;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
@@ -69,18 +69,25 @@ public class CleanActionExecutor<T, I, K, O> extends BaseActionExecutor<T, I, K,
 
   public CleanActionExecutor(HoodieEngineContext context, HoodieWriteConfig config, HoodieTable<T, I, K, O> table, String instantTime, boolean skipLocking) {
     super(context, config, table, instantTime);
-    this.txnManager = new TransactionManager(config, table.getMetaClient().getFs());
+    this.txnManager = new TransactionManager(config, table.getStorage());
     this.skipLocking = skipLocking;
   }
 
-  private static Boolean deleteFileAndGetResult(FileSystem fs, String deletePathStr) throws IOException {
-    Path deletePath = new Path(deletePathStr);
+  private static Boolean deleteFileAndGetResult(HoodieStorage storage, String deletePathStr) throws IOException {
+    StoragePath deletePath = new StoragePath(deletePathStr);
     LOG.debug("Working on delete path :" + deletePath);
     try {
-      boolean isDirectory = fs.isDirectory(deletePath);
-      boolean deleteResult = fs.delete(deletePath, isDirectory);
+      boolean deleteResult = storage.getPathInfo(deletePath).isDirectory()
+          ? storage.deleteDirectory(deletePath)
+          : storage.deleteFile(deletePath);
       if (deleteResult) {
         LOG.debug("Cleaned file at path :" + deletePath);
+      } else {
+        if (storage.exists(deletePath)) {
+          throw new HoodieIOException("Failed to delete path during clean execution " + deletePath);
+        } else {
+          LOG.debug("Already cleaned up file at path :" + deletePath);
+        }
       }
       return deleteResult;
     } catch (FileNotFoundException fio) {
@@ -91,16 +98,15 @@ public class CleanActionExecutor<T, I, K, O> extends BaseActionExecutor<T, I, K,
 
   private static Stream<Pair<String, PartitionCleanStat>> deleteFilesFunc(Iterator<Pair<String, CleanFileInfo>> cleanFileInfo, HoodieTable table) {
     Map<String, PartitionCleanStat> partitionCleanStatMap = new HashMap<>();
-    FileSystem fs = table.getMetaClient().getFs();
+    HoodieStorage storage = table.getStorage();
 
     cleanFileInfo.forEachRemaining(partitionDelFileTuple -> {
       String partitionPath = partitionDelFileTuple.getLeft();
-      Path deletePath = new Path(partitionDelFileTuple.getRight().getFilePath());
+      StoragePath deletePath = new StoragePath(partitionDelFileTuple.getRight().getFilePath());
       String deletePathStr = deletePath.toString();
       boolean deletedFileResult = false;
       try {
-        deletedFileResult = deleteFileAndGetResult(fs, deletePathStr);
-
+        deletedFileResult = deleteFileAndGetResult(storage, deletePathStr);
       } catch (IOException e) {
         LOG.error("Delete file failed: " + deletePathStr, e);
       }
@@ -152,7 +158,7 @@ public class CleanActionExecutor<T, I, K, O> extends BaseActionExecutor<T, I, K,
     partitionsToBeDeleted.forEach(entry -> {
       try {
         if (!isNullOrEmpty(entry)) {
-          deleteFileAndGetResult(table.getMetaClient().getFs(), table.getMetaClient().getBasePath() + "/" + entry);
+          deleteFileAndGetResult(table.getStorage(), table.getMetaClient().getBasePath() + "/" + entry);
         }
       } catch (IOException e) {
         LOG.warn("Partition deletion failed " + entry);
@@ -168,7 +174,7 @@ public class CleanActionExecutor<T, I, K, O> extends BaseActionExecutor<T, I, K,
       return HoodieCleanStat.newBuilder().withPolicy(config.getCleanerPolicy()).withPartitionPath(partitionPath)
           .withEarliestCommitRetained(Option.ofNullable(
               actionInstant != null
-                  ? new HoodieInstant(HoodieInstant.State.valueOf(actionInstant.getState()),
+                  ? instantGenerator.createNewInstant(HoodieInstant.State.valueOf(actionInstant.getState()),
                   actionInstant.getAction(), actionInstant.getTimestamp())
                   : null))
           .withLastCompletedCommitTimestamp(cleanerPlan.getLastCompletedCommitTimestamp())
@@ -217,7 +223,7 @@ public class CleanActionExecutor<T, I, K, O> extends BaseActionExecutor<T, I, K,
 
       table.getMetaClient().reloadActiveTimeline();
       HoodieCleanMetadata metadata = CleanerUtils.convertCleanMetadata(
-          inflightInstant.getTimestamp(),
+          inflightInstant.requestedTime(),
           Option.of(timer.endTimer()),
           cleanStats,
           cleanerPlan.getExtraMetadata()
@@ -225,16 +231,16 @@ public class CleanActionExecutor<T, I, K, O> extends BaseActionExecutor<T, I, K,
       if (!skipLocking) {
         this.txnManager.beginTransaction(Option.of(inflightInstant), Option.empty());
       }
-      writeTableMetadata(metadata, inflightInstant.getTimestamp());
+      writeTableMetadata(metadata, inflightInstant.requestedTime());
       table.getActiveTimeline().transitionCleanInflightToComplete(false,
           inflightInstant, TimelineMetadataUtils.serializeCleanMetadata(metadata));
-      LOG.info("Marked clean started on " + inflightInstant.getTimestamp() + " as complete");
+      LOG.info("Marked clean started on " + inflightInstant.requestedTime() + " as complete");
       return metadata;
     } catch (IOException e) {
       throw new HoodieIOException("Failed to clean up after commit", e);
     } finally {
       if (!skipLocking) {
-        this.txnManager.endTransaction(Option.of(inflightInstant));
+        this.txnManager.endTransaction(Option.ofNullable(inflightInstant));
       }
     }
   }
@@ -249,7 +255,7 @@ public class CleanActionExecutor<T, I, K, O> extends BaseActionExecutor<T, I, K,
       // try to clean old history schema.
       try {
         FileBasedInternalSchemaStorageManager fss = new FileBasedInternalSchemaStorageManager(table.getMetaClient());
-        fss.cleanOldFiles(pendingCleanInstants.stream().map(is -> is.getTimestamp()).collect(Collectors.toList()));
+        fss.cleanOldFiles(pendingCleanInstants.stream().map(is -> is.requestedTime()).collect(Collectors.toList()));
       } catch (Exception e) {
         // we should not affect original clean logic. Swallow exception and log warn.
         LOG.warn("failed to clean old history schema");
@@ -269,9 +275,12 @@ public class CleanActionExecutor<T, I, K, O> extends BaseActionExecutor<T, I, K,
             throw e;
           }
         }
-        table.getMetaClient().reloadActiveTimeline();
-        if (table.getMetaClient().getTableConfig().isMetadataTableAvailable()) {
-          table.getHoodieView().sync();
+        if (!pendingCleanInstants.get(pendingCleanInstants.size() - 1).equals(hoodieInstant)) {
+          // refresh the view of the table if there are more instants to clean
+          table.getMetaClient().reloadActiveTimeline();
+          if (table.getMetaClient().getTableConfig().isMetadataTableAvailable()) {
+            table.getHoodieView().sync();
+          }
         }
       }
     }
@@ -284,7 +293,7 @@ public class CleanActionExecutor<T, I, K, O> extends BaseActionExecutor<T, I, K,
 
   private void checkIfOtherWriterCommitted(HoodieInstant hoodieInstant, HoodieIOException e) {
     table.getMetaClient().reloadActiveTimeline();
-    if (table.getCleanTimeline().filterCompletedInstants().containsInstant(hoodieInstant.getTimestamp())) {
+    if (table.getCleanTimeline().filterCompletedInstants().containsInstant(hoodieInstant.requestedTime())) {
       LOG.warn("Clean operation was completed by another writer for instant: " + hoodieInstant);
     } else {
       LOG.error("Failed to perform previous clean operation, instant: " + hoodieInstant, e);

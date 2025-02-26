@@ -18,6 +18,21 @@
 
 package org.apache.hudi.table.action.commit;
 
+import org.apache.hudi.common.engine.HoodieEngineContext;
+import org.apache.hudi.common.model.HoodieKey;
+import org.apache.hudi.common.model.HoodieRecordLocation;
+import org.apache.hudi.common.model.WriteOperationType;
+import org.apache.hudi.common.util.Option;
+import org.apache.hudi.common.util.ValidationUtils;
+import org.apache.hudi.common.util.collection.Pair;
+import org.apache.hudi.config.HoodieWriteConfig;
+import org.apache.hudi.exception.HoodieException;
+import org.apache.hudi.index.bucket.BucketIdentifier;
+import org.apache.hudi.index.bucket.HoodieBucketIndex;
+import org.apache.hudi.table.HoodieTable;
+import org.apache.hudi.table.WorkloadProfile;
+import org.apache.hudi.table.WorkloadStat;
+
 import java.util.ArrayList;
 import java.util.Collections;
 import java.util.HashMap;
@@ -27,21 +42,7 @@ import java.util.Map;
 import java.util.Map.Entry;
 import java.util.Set;
 
-import org.apache.hudi.common.model.WriteOperationType;
-import org.apache.hudi.index.bucket.BucketIdentifier;
 import scala.Tuple2;
-
-import org.apache.hudi.common.engine.HoodieEngineContext;
-import org.apache.hudi.common.model.HoodieKey;
-import org.apache.hudi.common.model.HoodieRecordLocation;
-import org.apache.hudi.common.util.Option;
-import org.apache.hudi.common.util.collection.Pair;
-import org.apache.hudi.config.HoodieWriteConfig;
-import org.apache.hudi.exception.HoodieException;
-import org.apache.hudi.index.bucket.HoodieBucketIndex;
-import org.apache.hudi.table.HoodieTable;
-import org.apache.hudi.table.WorkloadProfile;
-import org.apache.hudi.table.WorkloadStat;
 
 import static org.apache.hudi.common.model.WriteOperationType.INSERT_OVERWRITE;
 import static org.apache.hudi.common.model.WriteOperationType.INSERT_OVERWRITE_TABLE;
@@ -115,22 +116,26 @@ public class SparkBucketIndexPartitioner<T> extends
   @Override
   public BucketInfo getBucketInfo(int bucketNumber) {
     String partitionPath = partitionPaths.get(bucketNumber / numBuckets);
-    String bucketId = BucketIdentifier.bucketIdStr(bucketNumber % numBuckets);
     // Insert overwrite always generates new bucket file id
     if (isOverwrite) {
-      return new BucketInfo(BucketType.INSERT, BucketIdentifier.newBucketFileIdPrefix(bucketId), partitionPath);
+      ValidationUtils.checkArgument(!isNonBlockingConcurrencyControl,
+          "Insert overwrite is not supported with non-blocking concurrency control");
+      return new BucketInfo(BucketType.INSERT, BucketIdentifier.newBucketFileIdPrefix(bucketNumber % numBuckets), partitionPath);
     }
     Option<String> fileIdOption = Option.fromJavaOptional(updatePartitionPathFileIds
         .getOrDefault(partitionPath, Collections.emptySet()).stream()
-        .filter(e -> e.startsWith(bucketId))
+        .filter(e -> e.startsWith(BucketIdentifier.bucketIdStr(bucketNumber % numBuckets)))
         .findFirst());
     if (fileIdOption.isPresent()) {
       return new BucketInfo(BucketType.UPDATE, fileIdOption.get(), partitionPath);
     } else {
       // Always write into log file instead of base file if using NB-CC
-      BucketType bucketType = isNonBlockingConcurrencyControl ? BucketType.UPDATE : BucketType.INSERT;
-      String fileIdPrefix = BucketIdentifier.newBucketFileIdPrefix(bucketId, isNonBlockingConcurrencyControl);
-      return new BucketInfo(bucketType, fileIdPrefix, partitionPath);
+      if (isNonBlockingConcurrencyControl) {
+        String fileId = BucketIdentifier.newBucketFileIdForNBCC(bucketNumber);
+        return new BucketInfo(BucketType.UPDATE, fileId, partitionPath);
+      }
+      String fileIdPrefix = BucketIdentifier.newBucketFileIdPrefix(bucketNumber % numBuckets);
+      return new BucketInfo(BucketType.INSERT, fileIdPrefix, partitionPath);
     }
   }
 
@@ -146,7 +151,7 @@ public class SparkBucketIndexPartitioner<T> extends
     Option<HoodieRecordLocation> location = keyLocation._2;
     int bucketId = location.isPresent()
         ? BucketIdentifier.bucketIdFromFileId(location.get().getFileId())
-        : BucketIdentifier.getBucketId(keyLocation._1, indexKeyField, numBuckets);
+        : BucketIdentifier.getBucketId(keyLocation._1.getRecordKey(), indexKeyField, numBuckets);
     return partitionPathOffset.get(partitionPath) + bucketId;
   }
 }

@@ -20,6 +20,7 @@
 package org.apache.hudi.hadoop.fs;
 
 import org.apache.hudi.common.util.RetryHelper;
+import org.apache.hudi.exception.HoodieIOException;
 
 import org.apache.hadoop.conf.Configuration;
 import org.apache.hadoop.fs.CreateFlag;
@@ -35,7 +36,6 @@ import org.apache.hadoop.fs.RemoteIterator;
 import org.apache.hadoop.fs.permission.FsPermission;
 import org.apache.hadoop.util.Progressable;
 
-import java.io.FileNotFoundException;
 import java.io.IOException;
 import java.net.URI;
 import java.util.EnumSet;
@@ -45,11 +45,11 @@ import java.util.EnumSet;
  */
 public class HoodieRetryWrapperFileSystem extends FileSystem {
 
-  private FileSystem fileSystem;
-  private long maxRetryIntervalMs;
-  private int maxRetryNumbers;
-  private long initialRetryIntervalMs;
-  private String retryExceptionsList;
+  private final FileSystem fileSystem;
+  private final long maxRetryIntervalMs;
+  private final int maxRetryNumbers;
+  private final long initialRetryIntervalMs;
+  private final String retryExceptionsList;
 
   public HoodieRetryWrapperFileSystem(FileSystem fs, long maxRetryIntervalMs, int maxRetryNumbers, long initialRetryIntervalMs, String retryExceptions) {
     this.fileSystem = fs;
@@ -185,16 +185,24 @@ public class HoodieRetryWrapperFileSystem extends FileSystem {
   @Override
   public boolean delete(Path f, boolean recursive) throws IOException {
     return new RetryHelper<Boolean, IOException>(maxRetryIntervalMs, maxRetryNumbers, initialRetryIntervalMs, retryExceptionsList)
-        .tryWith(() -> fileSystem.delete(f, recursive)).start().booleanValue();
+        .tryWith(() -> {
+          boolean success = fileSystem.delete(f, recursive);
+          if (!success) {
+            if (fileSystem.exists(f)) {
+              throw new HoodieIOException("Failed to delete file: " + f);
+            }
+          }
+          return success;
+        }).start().booleanValue();
   }
 
   @Override
   public boolean delete(Path f) throws IOException {
-    return new RetryHelper<Boolean, IOException>(maxRetryIntervalMs, maxRetryNumbers, initialRetryIntervalMs, retryExceptionsList).tryWith(() -> fileSystem.delete(f, true)).start().booleanValue();
+    return delete(f, true);
   }
 
   @Override
-  public FileStatus[] listStatus(Path f) throws FileNotFoundException, IOException {
+  public FileStatus[] listStatus(Path f) throws IOException {
     return new RetryHelper<FileStatus[], IOException>(maxRetryIntervalMs, maxRetryNumbers, initialRetryIntervalMs, retryExceptionsList).tryWith(() -> fileSystem.listStatus(f)).start();
   }
 

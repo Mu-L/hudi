@@ -31,8 +31,8 @@ import org.apache.hudi.common.model.HoodieRecordDelegate;
 import org.apache.hudi.common.model.HoodieRecordLocation;
 import org.apache.hudi.common.model.HoodieRecordPayload;
 import org.apache.hudi.common.table.HoodieTableMetaClient;
-import org.apache.hudi.common.table.timeline.HoodieActiveTimeline;
 import org.apache.hudi.common.table.timeline.HoodieTimeline;
+import org.apache.hudi.common.table.timeline.TimelineUtils;
 import org.apache.hudi.common.util.Option;
 import org.apache.hudi.common.util.RateLimiter;
 import org.apache.hudi.common.util.ReflectionUtils;
@@ -114,12 +114,13 @@ public class SparkHoodieHBaseIndex extends HoodieIndex<Object, Object> {
   private static final byte[] PARTITION_PATH_COLUMN = getUTF8Bytes("partition_path");
 
   private static final Logger LOG = LoggerFactory.getLogger(SparkHoodieHBaseIndex.class);
-  private static Connection hbaseConnection = null;
+  private static Connection HBASE_CONNECTION = null;
+  private static transient Thread SHUTDOWN_THREAD;
+
   private HBaseIndexQPSResourceAllocator hBaseIndexQPSResourceAllocator = null;
   private int maxQpsPerRegionServer;
   private long totalNumInserts;
   private int numWriteStatusWithInserts;
-  private static transient Thread shutdownThread;
 
   /**
    * multiPutBatchSize will be computed and re-set in updateLocation if
@@ -197,15 +198,15 @@ public class SparkHoodieHBaseIndex extends HoodieIndex<Object, Object> {
    * exits.
    */
   private void addShutDownHook() {
-    if (null == shutdownThread) {
-      shutdownThread = new Thread(() -> {
+    if (null == SHUTDOWN_THREAD) {
+      SHUTDOWN_THREAD = new Thread(() -> {
         try {
-          hbaseConnection.close();
+          HBASE_CONNECTION.close();
         } catch (Exception e) {
           // fail silently for any sort of exception
         }
       });
-      Runtime.getRuntime().addShutdownHook(shutdownThread);
+      Runtime.getRuntime().addShutdownHook(SHUTDOWN_THREAD);
     }
   }
 
@@ -244,12 +245,12 @@ public class SparkHoodieHBaseIndex extends HoodieIndex<Object, Object> {
       RateLimiter limiter = RateLimiter.create(multiGetBatchSize * 10, TimeUnit.SECONDS);
       // Grab the global HBase connection
       synchronized (SparkHoodieHBaseIndex.class) {
-        if (hbaseConnection == null || hbaseConnection.isClosed()) {
-          hbaseConnection = getHBaseConnection();
+        if (HBASE_CONNECTION == null || HBASE_CONNECTION.isClosed()) {
+          HBASE_CONNECTION = getHBaseConnection();
         }
       }
       List<HoodieRecord<R>> taggedRecords = new ArrayList<>();
-      try (HTable hTable = (HTable) hbaseConnection.getTable(TableName.valueOf(tableName))) {
+      try (HTable hTable = (HTable) HBASE_CONNECTION.getTable(TableName.valueOf(tableName))) {
         List<Get> statements = new ArrayList<>();
         List<HoodieRecord> currentBatchOfRecords = new LinkedList<>();
         // Do the tagging.
@@ -340,15 +341,15 @@ public class SparkHoodieHBaseIndex extends HoodieIndex<Object, Object> {
       List<WriteStatus> writeStatusList = new ArrayList<>();
       // Grab the global HBase connection
       synchronized (SparkHoodieHBaseIndex.class) {
-        if (hbaseConnection == null || hbaseConnection.isClosed()) {
-          hbaseConnection = getHBaseConnection();
+        if (HBASE_CONNECTION == null || HBASE_CONNECTION.isClosed()) {
+          HBASE_CONNECTION = getHBaseConnection();
         }
       }
       final long startTimeForPutsTask = DateTime.now().getMillis();
       LOG.info("startTimeForPutsTask for this task: " + startTimeForPutsTask);
 
       final RateLimiter limiter = RateLimiter.create(multiPutBatchSize, TimeUnit.SECONDS);
-      try (BufferedMutator mutator = hbaseConnection.getBufferedMutator(TableName.valueOf(tableName))) {
+      try (BufferedMutator mutator = HBASE_CONNECTION.getBufferedMutator(TableName.valueOf(tableName))) {
         while (statusIterator.hasNext()) {
           WriteStatus writeStatus = statusIterator.next();
           List<Mutation> mutations = new ArrayList<>();
@@ -551,7 +552,7 @@ public class SparkHoodieHBaseIndex extends HoodieIndex<Object, Object> {
       int maxReqPerSec = getMaxReqPerSec(numRSAlive, maxQpsPerRegionServer, qpsFraction);
       int numTasks = numTasksDuringPut;
       int maxParallelPutsTask = Math.max(1, Math.min(numTasks, maxExecutors));
-      int multiPutBatchSizePerSecPerTask = Math.max(1, (int) Math.ceil(maxReqPerSec / maxParallelPutsTask));
+      int multiPutBatchSizePerSecPerTask = Math.max(1, (int) Math.ceil((double) maxReqPerSec / maxParallelPutsTask));
       LOG.info("HbaseIndexThrottling: qpsFraction :" + qpsFraction);
       LOG.info("HbaseIndexThrottling: numRSAlive :" + numRSAlive);
       LOG.info("HbaseIndexThrottling: maxReqPerSec :" + maxReqPerSec);
@@ -596,14 +597,14 @@ public class SparkHoodieHBaseIndex extends HoodieIndex<Object, Object> {
     }
 
     synchronized (SparkHoodieHBaseIndex.class) {
-      if (hbaseConnection == null || hbaseConnection.isClosed()) {
-        hbaseConnection = getHBaseConnection();
+      if (HBASE_CONNECTION == null || HBASE_CONNECTION.isClosed()) {
+        HBASE_CONNECTION = getHBaseConnection();
       }
     }
     final RateLimiter limiter = RateLimiter.create(multiPutBatchSize, TimeUnit.SECONDS);
-    try (HTable hTable = (HTable) hbaseConnection.getTable(TableName.valueOf(tableName));
-         BufferedMutator mutator = hbaseConnection.getBufferedMutator(TableName.valueOf(tableName))) {
-      Long rollbackTime = HoodieActiveTimeline.parseDateFromInstantTime(instantTime).getTime();
+    try (HTable hTable = (HTable) HBASE_CONNECTION.getTable(TableName.valueOf(tableName));
+         BufferedMutator mutator = HBASE_CONNECTION.getBufferedMutator(TableName.valueOf(tableName))) {
+      Long rollbackTime = TimelineUtils.parseDateFromInstantTime(instantTime).getTime();
       Long currentTime = new Date().getTime();
       Scan scan = new Scan();
       scan.addFamily(SYSTEM_COLUMN_FAMILY);
@@ -682,7 +683,7 @@ public class SparkHoodieHBaseIndex extends HoodieIndex<Object, Object> {
   }
 
   public void setHbaseConnection(Connection hbaseConnection) {
-    SparkHoodieHBaseIndex.hbaseConnection = hbaseConnection;
+    SparkHoodieHBaseIndex.HBASE_CONNECTION = hbaseConnection;
   }
 
   /**
@@ -691,7 +692,7 @@ public class SparkHoodieHBaseIndex extends HoodieIndex<Object, Object> {
    * that are based on inserts in each WriteStatus.
    */
   public static class WriteStatusPartitioner extends Partitioner {
-    private int totalPartitions;
+    private final int totalPartitions;
     final Map<String, Integer> fileIdPartitionMap;
 
     public WriteStatusPartitioner(final Map<String, Integer> fileIdPartitionMap, final int totalPartitions) {

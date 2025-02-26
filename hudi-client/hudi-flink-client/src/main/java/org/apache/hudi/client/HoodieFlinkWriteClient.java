@@ -20,7 +20,6 @@ package org.apache.hudi.client;
 
 import org.apache.hudi.client.common.HoodieFlinkEngineContext;
 import org.apache.hudi.client.utils.TransactionUtils;
-import org.apache.hudi.common.data.HoodieData;
 import org.apache.hudi.common.data.HoodieListData;
 import org.apache.hudi.common.engine.HoodieEngineContext;
 import org.apache.hudi.common.fs.FSUtils;
@@ -51,12 +50,12 @@ import org.apache.hudi.table.upgrade.UpgradeDowngrade;
 import org.apache.hudi.util.WriteStatMerger;
 
 import com.codahale.metrics.Timer;
-import org.apache.hadoop.conf.Configuration;
 import org.apache.hadoop.fs.Path;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
 import java.util.Collection;
+import java.util.Comparator;
 import java.util.HashMap;
 import java.util.Iterator;
 import java.util.List;
@@ -109,17 +108,17 @@ public class HoodieFlinkWriteClient<T> extends
         .values().stream()
         .map(duplicates -> duplicates.stream().reduce(WriteStatMerger::merge).get())
         .collect(Collectors.toList());
-    return commitStats(instantTime, HoodieListData.eager(writeStatuses), merged, extraMetadata, commitActionType, partitionToReplacedFileIds, extraPreCommitFunc);
+    return commitStats(instantTime, merged, extraMetadata, commitActionType, partitionToReplacedFileIds, extraPreCommitFunc);
   }
 
   @Override
-  protected HoodieTable createTable(HoodieWriteConfig config, Configuration hadoopConf) {
-    return HoodieFlinkTable.create(config, (HoodieFlinkEngineContext) context);
+  protected HoodieTable createTable(HoodieWriteConfig config) {
+    return createTableAndValidate(config, HoodieFlinkTable::create);
   }
 
   @Override
-  protected HoodieTable createTable(HoodieWriteConfig config, Configuration hadoopConf, HoodieTableMetaClient metaClient) {
-    return HoodieFlinkTable.create(config, (HoodieFlinkEngineContext) context, metaClient);
+  protected HoodieTable createTable(HoodieWriteConfig config, HoodieTableMetaClient metaClient) {
+    return createTableAndValidate(config, metaClient, HoodieFlinkTable::create);
   }
 
   @Override
@@ -254,6 +253,7 @@ public class HoodieFlinkWriteClient<T> extends
     Map<String, List<HoodieRecord<T>>> preppedRecordsByFileId = preppedRecords.stream().parallel()
         .collect(Collectors.groupingBy(r -> r.getCurrentLocation().getFileId()));
     return preppedRecordsByFileId.values().stream().parallel().map(records -> {
+      records.sort(Comparator.comparing(HoodieRecord::getRecordKey));
       HoodieWriteMetadata<List<WriteStatus>> result;
       records.get(0).getCurrentLocation().setInstantTime("I");
       try (AutoCloseableWriteHandle closeableHandle = new AutoCloseableWriteHandle(records, instantTime, table, true)) {
@@ -300,12 +300,10 @@ public class HoodieFlinkWriteClient<T> extends
 
   /**
    * Refresh the last transaction metadata,
-   * should be called before the Driver starts a new transaction.
+   * should be called before the Driver starts a new transaction with a reloaded metaclient.
    */
   public void preTxn(WriteOperationType operationType, HoodieTableMetaClient metaClient) {
     if (txnManager.isLockRequired() && config.needResolveWriteConflict(operationType)) {
-      // refresh the meta client which is reused
-      metaClient.reloadActiveTimeline();
       this.lastCompletedTxnAndMetadata = TransactionUtils.getLastCompletedTxnInstantAndMetadata(metaClient);
       this.pendingInflightAndRequestedInstants = TransactionUtils.getInflightAndRequestedInstants(metaClient);
     }
@@ -374,9 +372,8 @@ public class HoodieFlinkWriteClient<T> extends
   private void completeClustering(
       HoodieReplaceCommitMetadata metadata,
       HoodieTable<T, List<HoodieRecord<T>>, List<HoodieKey>, List<WriteStatus>> table,
-      String clusteringCommitTime,
-      Option<HoodieData<WriteStatus>> writeStatuses) {
-    ((HoodieFlinkTableServiceClient<T>) tableServiceClient).completeClustering(metadata, table, clusteringCommitTime, writeStatuses);
+      String clusteringCommitTime) {
+    ((HoodieFlinkTableServiceClient<T>) tableServiceClient).completeClustering(metadata, table, clusteringCommitTime);
   }
 
   @Override
@@ -393,11 +390,10 @@ public class HoodieFlinkWriteClient<T> extends
       TableServiceType tableServiceType,
       HoodieCommitMetadata metadata,
       HoodieTable<T, List<HoodieRecord<T>>, List<HoodieKey>, List<WriteStatus>> table,
-      String commitInstant,
-      Option<HoodieData<WriteStatus>> writeStatuses) {
+      String commitInstant) {
     switch (tableServiceType) {
       case CLUSTER:
-        completeClustering((HoodieReplaceCommitMetadata) metadata, table, commitInstant, writeStatuses);
+        completeClustering((HoodieReplaceCommitMetadata) metadata, table, commitInstant);
         break;
       case COMPACT:
         completeCompaction(metadata, table, commitInstant);
@@ -432,6 +428,11 @@ public class HoodieFlinkWriteClient<T> extends
     cleanHandles();
   }
 
+  @Override
+  protected void updateColumnsToIndexWithColStats(HoodieTableMetaClient metaClient, List<String> columnsToIndex) {
+    //no op. HUDI-8801 to fix.
+  }
+
   /**
    * Get or create a new write handle in order to reuse the file handles.
    *
@@ -459,7 +460,7 @@ public class HoodieFlinkWriteClient<T> extends
   }
 
   public HoodieFlinkTable<T> getHoodieTable() {
-    return HoodieFlinkTable.create(config, (HoodieFlinkEngineContext) context);
+    return HoodieFlinkTable.create(config, context);
   }
 
   public Map<String, List<String>> getPartitionToReplacedFileIds(
@@ -476,7 +477,7 @@ public class HoodieFlinkWriteClient<T> extends
       case INSERT_OVERWRITE_TABLE:
         Map<String, List<String>> partitionToExistingFileIds = new HashMap<>();
         List<String> partitionPaths =
-            FSUtils.getAllPartitionPaths(context, config.getMetadataConfig(), table.getMetaClient().getBasePath());
+            FSUtils.getAllPartitionPaths(context, table.getStorage(), config.getMetadataConfig(), table.getMetaClient().getBasePath());
         if (partitionPaths != null && partitionPaths.size() > 0) {
           context.setJobStatus(this.getClass().getSimpleName(), "Getting ExistingFileIds of all partitions: " + config.getTableName());
           partitionToExistingFileIds = partitionPaths.stream().parallel()

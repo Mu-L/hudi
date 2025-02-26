@@ -29,7 +29,6 @@ import org.apache.hudi.table.HoodieSparkCopyOnWriteTable;
 
 import org.junit.jupiter.api.Assertions;
 import org.junit.jupiter.api.Test;
-
 import org.mockito.Mock;
 
 import java.util.ArrayList;
@@ -68,7 +67,7 @@ public class TestSparkSizeBasedClusteringPlanStrategy {
     fileSlices.add(createFileSlice(400));
     fileSlices.add(createFileSlice(400));
 
-    Stream<HoodieClusteringGroup> clusteringGroupStream = planStrategy.buildClusteringGroupsForPartition("p0", fileSlices);
+    Stream<HoodieClusteringGroup> clusteringGroupStream = (Stream<HoodieClusteringGroup>) planStrategy.buildClusteringGroupsForPartition("p0", fileSlices).getLeft();
     List<HoodieClusteringGroup> clusteringGroups = clusteringGroupStream.collect(Collectors.toList());
 
     // FileSlices will be divided into two clusteringGroups

@@ -18,27 +18,47 @@
 
 package org.apache.hudi.common.testutils;
 
+import org.apache.hudi.avro.model.HoodieCleanMetadata;
+import org.apache.hudi.common.engine.HoodieEngineContext;
 import org.apache.hudi.common.model.FileSlice;
-import org.apache.hudi.common.model.HoodieAvroPayload;
 import org.apache.hudi.common.model.HoodieFileFormat;
 import org.apache.hudi.common.model.HoodieTableType;
 import org.apache.hudi.common.model.HoodieWriteStat;
 import org.apache.hudi.common.model.HoodieWriteStat.RuntimeStats;
 import org.apache.hudi.common.table.HoodieTableConfig;
 import org.apache.hudi.common.table.HoodieTableMetaClient;
+import org.apache.hudi.common.table.HoodieTableVersion;
+import org.apache.hudi.common.table.timeline.CommitMetadataSerDe;
 import org.apache.hudi.common.table.timeline.HoodieInstant;
+import org.apache.hudi.common.table.timeline.InstantComparator;
+import org.apache.hudi.common.table.timeline.InstantFileNameGenerator;
+import org.apache.hudi.common.table.timeline.InstantFileNameParser;
+import org.apache.hudi.common.table.timeline.InstantGenerator;
+import org.apache.hudi.common.table.timeline.TimelineFactory;
+import org.apache.hudi.common.table.timeline.versioning.DefaultCommitMetadataSerDe;
+import org.apache.hudi.common.table.timeline.versioning.DefaultInstantComparator;
+import org.apache.hudi.common.table.timeline.versioning.DefaultInstantFileNameGenerator;
+import org.apache.hudi.common.table.timeline.versioning.DefaultInstantFileNameParser;
+import org.apache.hudi.common.table.timeline.versioning.DefaultInstantGenerator;
+import org.apache.hudi.common.table.timeline.versioning.DefaultTimelineFactory;
+import org.apache.hudi.common.util.CleanerUtils;
+import org.apache.hudi.common.util.Option;
+import org.apache.hudi.common.util.ReflectionUtils;
+import org.apache.hudi.common.util.collection.Pair;
 import org.apache.hudi.exception.HoodieIOException;
-import org.apache.hudi.hadoop.fs.HoodieWrapperFileSystem;
+import org.apache.hudi.keygen.constant.KeyGeneratorOptions;
 import org.apache.hudi.metadata.HoodieTableMetadata;
+import org.apache.hudi.storage.HoodieStorage;
+import org.apache.hudi.storage.HoodieStorageUtils;
+import org.apache.hudi.storage.StorageConfiguration;
+import org.apache.hudi.storage.StoragePath;
+import org.apache.hudi.storage.StoragePathInfo;
 
 import com.esotericsoftware.kryo.Kryo;
 import com.esotericsoftware.kryo.io.Input;
 import com.esotericsoftware.kryo.io.Output;
 import com.esotericsoftware.kryo.serializers.JavaSerializer;
 import org.apache.hadoop.conf.Configuration;
-import org.apache.hadoop.fs.FileStatus;
-import org.apache.hadoop.fs.FileSystem;
-import org.apache.hadoop.fs.Path;
 import org.apache.hadoop.hdfs.DistributedFileSystem;
 import org.junit.jupiter.api.Assumptions;
 
@@ -48,10 +68,15 @@ import java.io.IOException;
 import java.io.Serializable;
 import java.util.ArrayList;
 import java.util.List;
+import java.util.Map;
 import java.util.Objects;
 import java.util.Properties;
 import java.util.UUID;
 import java.util.stream.Collectors;
+
+import static org.apache.hudi.storage.HoodieStorageUtils.DEFAULT_URI;
+import static org.junit.jupiter.api.Assertions.assertEquals;
+import static org.junit.jupiter.api.Assertions.assertFalse;
 
 /**
  * A utility class for testing.
@@ -63,9 +88,34 @@ public class HoodieTestUtils {
   public static final String DEFAULT_WRITE_TOKEN = "1-0-1";
   public static final int DEFAULT_LOG_VERSION = 1;
   public static final String[] DEFAULT_PARTITION_PATHS = {"2016/03/15", "2015/03/16", "2015/03/17"};
+  public static final String HADOOP_STORAGE_CONF = "org.apache.hudi.storage.hadoop.HadoopStorageConfiguration";
+  public static final InstantGenerator INSTANT_GENERATOR = new DefaultInstantGenerator();
+  public static final TimelineFactory TIMELINE_FACTORY = new DefaultTimelineFactory();
+  public static final InstantFileNameGenerator INSTANT_FILE_NAME_GENERATOR = new DefaultInstantFileNameGenerator();
+  public static final InstantFileNameParser INSTANT_FILE_NAME_PARSER = new DefaultInstantFileNameParser();
+  public static final CommitMetadataSerDe COMMIT_METADATA_SER_DE = new DefaultCommitMetadataSerDe();
+  public static final InstantComparator INSTANT_COMPARATOR = new DefaultInstantComparator();
 
-  public static Configuration getDefaultHadoopConf() {
-    return new Configuration();
+  public static StorageConfiguration<Configuration> getDefaultStorageConf() {
+    return (StorageConfiguration<Configuration>) ReflectionUtils.loadClass(HADOOP_STORAGE_CONF,
+        new Class<?>[] {Boolean.class}, false);
+  }
+
+  public static StorageConfiguration<Configuration> getDefaultStorageConfWithDefaults() {
+    return (StorageConfiguration<Configuration>) ReflectionUtils.loadClass(HADOOP_STORAGE_CONF,
+        new Class<?>[] {Boolean.class}, true);
+  }
+
+  public static HoodieStorage getDefaultStorage() {
+    return getStorage(DEFAULT_URI);
+  }
+
+  public static HoodieStorage getStorage(String path) {
+    return HoodieStorageUtils.getStorage(path, getDefaultStorageConf());
+  }
+
+  public static HoodieStorage getStorage(StoragePath path) {
+    return HoodieStorageUtils.getStorage(path, getDefaultStorageConf());
   }
 
   public static HoodieTableMetaClient init(String basePath) throws IOException {
@@ -73,11 +123,11 @@ public class HoodieTestUtils {
   }
 
   public static HoodieTableMetaClient init(String basePath, HoodieTableType tableType) throws IOException {
-    return init(getDefaultHadoopConf(), basePath, tableType);
+    return init(getDefaultStorageConf(), basePath, tableType);
   }
 
   public static HoodieTableMetaClient init(String basePath, HoodieTableType tableType, Properties properties) throws IOException {
-    return init(getDefaultHadoopConf(), basePath, tableType, properties);
+    return init(getDefaultStorageConf(), basePath, tableType, properties);
   }
 
   public static HoodieTableMetaClient init(String basePath, HoodieTableType tableType, String bootstrapBasePath, boolean bootstrapIndexEnable, String keyGenerator) throws IOException {
@@ -85,7 +135,12 @@ public class HoodieTestUtils {
   }
 
   public static HoodieTableMetaClient init(String basePath, HoodieTableType tableType, String bootstrapBasePath, boolean bootstrapIndexEnable, String keyGenerator,
-                                             String partitionFieldConfigValue) throws IOException {
+                                           String partitionFieldConfigValue) throws IOException {
+    return init(basePath, tableType, bootstrapBasePath, bootstrapIndexEnable, keyGenerator, partitionFieldConfigValue, Option.empty());
+  }
+
+  public static HoodieTableMetaClient init(String basePath, HoodieTableType tableType, String bootstrapBasePath, boolean bootstrapIndexEnable, String keyGenerator,
+                                           String partitionFieldConfigValue, Option<HoodieTableVersion> tableVersionOption) throws IOException {
     Properties props = new Properties();
     props.setProperty(HoodieTableConfig.BOOTSTRAP_BASE_PATH.key(), bootstrapBasePath);
     props.put(HoodieTableConfig.BOOTSTRAP_INDEX_ENABLE.key(), bootstrapIndexEnable);
@@ -96,7 +151,12 @@ public class HoodieTestUtils {
       props.put("hoodie.datasource.write.partitionpath.field", partitionFieldConfigValue);
       props.put(HoodieTableConfig.PARTITION_FIELDS.key(), partitionFieldConfigValue);
     }
-    return init(getDefaultHadoopConf(), basePath, tableType, props);
+    if (tableVersionOption.isPresent()) {
+      HoodieTableVersion tableVersion = tableVersionOption.get();
+      props.put("hoodie.table.version", Integer.valueOf(tableVersion.versionCode()).toString());
+      props.put("hoodie.timeline.layout.version", tableVersion.getTimelineLayoutVersion().getVersion());
+    }
+    return init(getDefaultStorageConf(), basePath, tableType, props);
   }
 
   public static HoodieTableMetaClient init(String basePath, HoodieTableType tableType, String bootstrapBasePath, boolean bootstrapIndexEnable) throws IOException {
@@ -104,40 +164,47 @@ public class HoodieTestUtils {
   }
 
   public static HoodieTableMetaClient init(String basePath, HoodieFileFormat baseFileFormat) throws IOException {
-    return init(getDefaultHadoopConf(), basePath, HoodieTableType.COPY_ON_WRITE, baseFileFormat);
+    return init(getDefaultStorageConf(), basePath, HoodieTableType.COPY_ON_WRITE, baseFileFormat);
   }
 
-  public static HoodieTableMetaClient init(Configuration hadoopConf, String basePath) throws IOException {
-    return init(hadoopConf, basePath, HoodieTableType.COPY_ON_WRITE);
+  public static HoodieTableMetaClient init(String basePath, HoodieTableType tableType, HoodieTableVersion version) throws IOException {
+    Properties properties = new Properties();
+    properties.setProperty(HoodieTableConfig.VERSION.key(), String.valueOf(version.versionCode()));
+    properties.setProperty(KeyGeneratorOptions.PARTITIONPATH_FIELD_NAME.key(), "partition");
+    return init(getDefaultStorageConf(), basePath, tableType, properties);
   }
 
-  public static HoodieTableMetaClient init(Configuration hadoopConf, String basePath, HoodieTableType tableType)
+  public static HoodieTableMetaClient init(StorageConfiguration<?> storageConf, String basePath) throws IOException {
+    return init(storageConf, basePath, HoodieTableType.COPY_ON_WRITE);
+  }
+
+  public static HoodieTableMetaClient init(StorageConfiguration<?> storageConf, String basePath, HoodieTableType tableType)
       throws IOException {
-    return init(hadoopConf, basePath, tableType, new Properties());
+    return init(storageConf, basePath, tableType, new Properties());
   }
 
-  public static HoodieTableMetaClient init(Configuration hadoopConf, String basePath, HoodieTableType tableType,
+  public static HoodieTableMetaClient init(StorageConfiguration<?> storageConf, String basePath, HoodieTableType tableType,
                                            String tableName)
       throws IOException {
     Properties properties = new Properties();
     properties.setProperty(HoodieTableConfig.NAME.key(), tableName);
-    return init(hadoopConf, basePath, tableType, properties);
+    return init(storageConf, basePath, tableType, properties);
   }
 
-  public static HoodieTableMetaClient init(Configuration hadoopConf, String basePath, HoodieTableType tableType,
+  public static HoodieTableMetaClient init(StorageConfiguration<?> storageConf, String basePath, HoodieTableType tableType,
                                            HoodieFileFormat baseFileFormat, String databaseName)
       throws IOException {
     Properties properties = new Properties();
     properties.setProperty(HoodieTableConfig.BASE_FILE_FORMAT.key(), baseFileFormat.toString());
-    return init(hadoopConf, basePath, tableType, properties, databaseName);
+    return init(storageConf, basePath, tableType, properties, databaseName);
   }
 
-  public static HoodieTableMetaClient init(Configuration hadoopConf, String basePath, HoodieTableType tableType,
+  public static HoodieTableMetaClient init(StorageConfiguration<?> storageConf, String basePath, HoodieTableType tableType,
                                            HoodieFileFormat baseFileFormat) throws IOException {
-    return init(hadoopConf, basePath, tableType, baseFileFormat, false, null, true);
+    return init(storageConf, basePath, tableType, baseFileFormat, false, null, true);
   }
 
-  public static HoodieTableMetaClient init(Configuration hadoopConf, String basePath, HoodieTableType tableType,
+  public static HoodieTableMetaClient init(StorageConfiguration<?> storageConf, String basePath, HoodieTableType tableType,
                                            HoodieFileFormat baseFileFormat, boolean setKeyGen, String keyGenerator, boolean populateMetaFields)
       throws IOException {
     Properties properties = new Properties();
@@ -146,23 +213,26 @@ public class HoodieTestUtils {
       properties.setProperty("hoodie.datasource.write.keygenerator.class", keyGenerator);
     }
     properties.setProperty("hoodie.populate.meta.fields", Boolean.toString(populateMetaFields));
-    return init(hadoopConf, basePath, tableType, properties);
+    return init(storageConf, basePath, tableType, properties);
   }
 
-  public static HoodieTableMetaClient init(Configuration hadoopConf, String basePath, HoodieTableType tableType,
+  public static HoodieTableMetaClient init(StorageConfiguration<?> storageConf, String basePath, HoodieTableType tableType,
                                            Properties properties) throws IOException {
-    return init(hadoopConf, basePath, tableType, properties, null);
+    return init(storageConf, basePath, tableType, properties, null);
   }
 
-  public static HoodieTableMetaClient init(Configuration hadoopConf, String basePath, HoodieTableType tableType,
+  public static HoodieTableMetaClient init(StorageConfiguration<?> storageConf, String basePath, HoodieTableType tableType,
                                            Properties properties, String databaseName)
       throws IOException {
-    HoodieTableMetaClient.PropertyBuilder builder =
-        HoodieTableMetaClient.withPropertyBuilder()
+    HoodieTableMetaClient.TableBuilder builder =
+        HoodieTableMetaClient.newTableBuilder()
             .setDatabaseName(databaseName)
             .setTableName(RAW_TRIPS_TEST_NAME)
-            .setTableType(tableType)
-            .setPayloadClass(HoodieAvroPayload.class);
+            .setTableType(tableType);
+
+    if (properties.getProperty(HoodieTableConfig.KEY_GENERATOR_TYPE.key()) != null) {
+      builder.setKeyGeneratorType(properties.getProperty(HoodieTableConfig.KEY_GENERATOR_TYPE.key()));
+    }
 
     String keyGen = properties.getProperty("hoodie.datasource.write.keygenerator.class");
     if (!Objects.equals(keyGen, "org.apache.hudi.keygen.NonpartitionedKeyGenerator")
@@ -170,9 +240,8 @@ public class HoodieTestUtils {
       builder.setPartitionFields("some_nonexistent_field");
     }
 
-    Properties processedProperties = builder.fromProperties(properties).build();
-
-    return HoodieTableMetaClient.initTableAndGetMetaClient(hadoopConf, basePath, processedProperties);
+    return builder.fromProperties(properties)
+        .initTable(storageConf.newInstance(), basePath);
   }
 
   public static HoodieTableMetaClient init(String basePath, HoodieTableType tableType, String bootstrapBasePath, HoodieFileFormat baseFileFormat, String keyGenerator) throws IOException {
@@ -183,7 +252,52 @@ public class HoodieTestUtils {
       props.put("hoodie.datasource.write.keygenerator.class", keyGenerator);
       props.put("hoodie.datasource.write.partitionpath.field", "datestr");
     }
-    return init(getDefaultHadoopConf(), basePath, tableType, props);
+    return init(getDefaultStorageConf(), basePath, tableType, props);
+  }
+
+  /**
+   * @param storageConf storage configuration.
+   * @param basePath    base path of the Hudi table.
+   * @return a new {@link HoodieTableMetaClient} instance.
+   */
+  public static HoodieTableMetaClient createMetaClient(StorageConfiguration<?> storageConf,
+                                                       String basePath) {
+    return HoodieTableMetaClient.builder()
+        .setConf(storageConf).setBasePath(basePath).build();
+  }
+
+  public static HoodieTableMetaClient createMetaClient(StorageConfiguration<?> storageConf,
+                                                       StoragePath basePath, HoodieTableVersion tableVersion) {
+    return HoodieTableMetaClient.builder().setLayoutVersion(Option.of(tableVersion.getTimelineLayoutVersion()))
+            .setConf(storageConf).setBasePath(basePath).build();
+  }
+
+  /**
+   * @param storage  {@link HoodieStorage} instance.
+   * @param basePath base path of the Hudi table.
+   * @return a new {@link HoodieTableMetaClient} instance.
+   */
+  public static HoodieTableMetaClient createMetaClient(HoodieStorage storage,
+                                                       String basePath) {
+    return createMetaClient(storage.getConf().newInstance(), basePath);
+  }
+
+  /**
+   * @param context  Hudi engine context.
+   * @param basePath base path of the Hudi table.
+   * @return a new {@link HoodieTableMetaClient} instance.
+   */
+  public static HoodieTableMetaClient createMetaClient(HoodieEngineContext context,
+                                                       String basePath) {
+    return createMetaClient(context.getStorageConf().newInstance(), basePath);
+  }
+
+  /**
+   * @param basePath base path of the Hudi table.
+   * @return a new {@link HoodieTableMetaClient} instance with default configuration for tests.
+   */
+  public static HoodieTableMetaClient createMetaClient(String basePath) {
+    return createMetaClient(getDefaultStorageConf(), basePath);
   }
 
   public static <T extends Serializable> T serializeDeserialize(T object, Class<T> clazz) {
@@ -224,16 +338,16 @@ public class HoodieTestUtils {
   }
 
   public static void createCompactionCommitInMetadataTable(
-      Configuration hadoopConf, HoodieWrapperFileSystem wrapperFs, String basePath,
-      String instantTime) throws IOException {
+      StorageConfiguration<?> storageConf, String basePath, String instantTime) throws IOException {
     // This is to simulate a completed compaction commit in metadata table timeline,
     // so that the commits on data table timeline can be archived
     // Note that, if metadata table is enabled, instants in data table timeline,
     // which are more recent than the last compaction on the metadata table,
     // are not archived (HoodieTimelineArchiveLog::getInstantsToArchive)
     String metadataTableBasePath = HoodieTableMetadata.getMetadataTableBasePath(basePath);
-    HoodieTestUtils.init(hadoopConf, metadataTableBasePath, HoodieTableType.MERGE_ON_READ);
-    HoodieTestDataGenerator.createCommitFile(metadataTableBasePath, instantTime + "001", wrapperFs.getConf());
+    HoodieTestUtils.init(storageConf, metadataTableBasePath, HoodieTableType.MERGE_ON_READ);
+    HoodieTestDataGenerator.createCommitFile(metadataTableBasePath, instantTime + "001",
+        storageConf);
   }
 
   public static int getJavaVersion() {
@@ -268,29 +382,59 @@ public class HoodieTestUtils {
         .collect(Collectors.toList());
   }
 
-  public static HoodieInstant getCompleteInstant(FileSystem fs, Path parent,
+  public static HoodieInstant getCompleteInstant(HoodieStorage storage, StoragePath parent,
                                                  String instantTime, String action) {
-    return new HoodieInstant(getCompleteInstantFileStatus(fs, parent, instantTime, action));
+    return INSTANT_GENERATOR.createNewInstant(getCompleteInstantFileInfo(storage, parent, instantTime, action));
   }
 
-  public static Path getCompleteInstantPath(FileSystem fs, Path parent,
-                                            String instantTime, String action) {
-    return getCompleteInstantFileStatus(fs, parent, instantTime, action).getPath();
+  public static StoragePath getCompleteInstantPath(HoodieStorage storage, StoragePath parent,
+                                                   String instantTime, String action) {
+    return getCompleteInstantFileInfo(storage, parent, instantTime, action).getPath();
   }
 
-  private static FileStatus getCompleteInstantFileStatus(FileSystem fs, Path parent,
-                                                         String instantTime, String action) {
+  private static StoragePathInfo getCompleteInstantFileInfo(HoodieStorage storage,
+                                                            StoragePath parent,
+                                                            String instantTime, String action) {
     try {
       String actionSuffix = "." + action;
-      Path wildcardPath = new Path(parent, instantTime + "_*" + actionSuffix);
-      FileStatus[] fileStatuses = fs.globStatus(wildcardPath);
-      if (fileStatuses.length != 1) {
+      StoragePath wildcardPath = new StoragePath(parent, instantTime + "_*" + actionSuffix);
+      List<StoragePathInfo> pathInfoList = storage.globEntries(wildcardPath);
+      if (pathInfoList.size() != 1) {
         throw new IOException("Error occur when finding path " + wildcardPath);
       }
 
-      return fileStatuses[0];
+      return pathInfoList.get(0);
     } catch (IOException e) {
       throw new HoodieIOException("Failed to get instant file status", e);
     }
+  }
+
+  /**
+   * Gets the pair of partition and cleaned file from the clean metadata.
+   */
+  public static List<Pair<String, String>> getCleanedFiles(HoodieTableMetaClient metaClient, HoodieInstant cleanInstant) throws IOException {
+    HoodieCleanMetadata cleanMetadata = CleanerUtils.getCleanerMetadata(metaClient, cleanInstant);
+    List<Pair<String, String>> deleteFileList = new ArrayList<>();
+    cleanMetadata.getPartitionMetadata().forEach((partition, partitionMetadata) -> {
+      // Files deleted from a partition
+      List<String> deletedFiles = partitionMetadata.getDeletePathPatterns();
+      deletedFiles.forEach(entry -> deleteFileList.add(Pair.of(partition, entry)));
+    });
+    return deleteFileList;
+  }
+
+  public static void validateTableConfig(HoodieStorage storage,
+                                         String basePath,
+                                         Map<String, String> expectedConfigs,
+                                         List<String> nonExistentConfigs) {
+    HoodieTableConfig tableConfig = HoodieTableConfig.loadFromHoodieProps(storage, basePath);
+    expectedConfigs.forEach((key, value) -> {
+      String actual = tableConfig.getString(key);
+      assertEquals(value, actual,
+          String.format("Table config %s should be %s but is %s}",
+              key, value, actual));
+    });
+    nonExistentConfigs.forEach(key -> assertFalse(
+        tableConfig.contains(key), key + " should not be present in the table config"));
   }
 }

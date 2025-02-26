@@ -29,6 +29,7 @@ import org.apache.flink.table.types.logical.ArrayType;
 import org.apache.flink.table.types.logical.DecimalType;
 import org.apache.flink.table.types.logical.LocalZonedTimestampType;
 import org.apache.flink.table.types.logical.LogicalType;
+import org.apache.flink.table.types.logical.LogicalTypeRoot;
 import org.apache.flink.table.types.logical.MapType;
 import org.apache.flink.table.types.logical.RowType;
 import org.apache.flink.table.types.logical.TimestampType;
@@ -258,7 +259,7 @@ public class ParquetSchemaConverter {
                     throw new UnsupportedOperationException(
                         String.format(
                             "List field [%s] in List [%s] has to be required. ",
-                            type.toString(), fieldType.getName()));
+                            type, fieldType.getName()));
                   }
                 }
                 typeInfo =
@@ -285,7 +286,7 @@ public class ParquetSchemaConverter {
                         String.format(
                             "Unrecgonized List schema [%s] according to Parquet"
                                 + " standard",
-                            parquetGroupType.toString()));
+                            parquetGroupType));
                   }
                 }
               }
@@ -514,7 +515,7 @@ public class ParquetSchemaConverter {
                 .named(fieldName);
       } else {
         throw new UnsupportedOperationException(
-            "Unsupported SqlTimeTypeInfo " + typeInfo.toString());
+            "Unsupported SqlTimeTypeInfo " + typeInfo);
       }
 
     } else {
@@ -622,18 +623,25 @@ public class ParquetSchemaConverter {
         }
       case ARRAY:
         // <list-repetition> group <name> (LIST) {
-        //   repeated group list {
+        //   repeated group array {
         //     <element-repetition> <element-type> element;
         //   }
         // }
         ArrayType arrayType = (ArrayType) type;
         LogicalType elementType = arrayType.getElementType();
+
+        Types.GroupBuilder<GroupType> arrayGroupBuilder = Types.repeatedGroup();
+        if (elementType.getTypeRoot() == LogicalTypeRoot.ROW) {
+          RowType rowType = (RowType) elementType;
+          rowType.getFields().forEach(field ->
+                  arrayGroupBuilder.addField(convertToParquetType(field.getName(), field.getType(), repetition)));
+        } else {
+          arrayGroupBuilder.addField(convertToParquetType("element", elementType, repetition));
+        }
+
         return Types
             .buildGroup(repetition).as(OriginalType.LIST)
-            .addField(
-                Types.repeatedGroup()
-                    .addField(convertToParquetType("element", elementType, repetition))
-                    .named("list"))
+            .addField(arrayGroupBuilder.named("array"))
             .named(name);
       case MAP:
         // <map-repetition> group <name> (MAP) {

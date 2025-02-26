@@ -21,7 +21,6 @@ package org.apache.hudi.utilities;
 
 import org.apache.hudi.client.common.HoodieSparkEngineContext;
 import org.apache.hudi.common.config.HoodieMetadataConfig;
-import org.apache.hudi.common.config.SerializableConfiguration;
 import org.apache.hudi.common.config.TypedProperties;
 import org.apache.hudi.common.engine.HoodieLocalEngineContext;
 import org.apache.hudi.common.model.HoodieBaseFile;
@@ -34,6 +33,8 @@ import org.apache.hudi.exception.HoodieIOException;
 import org.apache.hudi.exception.TableNotFoundException;
 import org.apache.hudi.hadoop.fs.HadoopFSUtils;
 import org.apache.hudi.metadata.HoodieTableMetadata;
+import org.apache.hudi.storage.StorageConfiguration;
+import org.apache.hudi.storage.hadoop.HoodieHadoopStorage;
 
 import com.beust.jcommander.JCommander;
 import com.beust.jcommander.Parameter;
@@ -54,6 +55,7 @@ import java.io.BufferedReader;
 import java.io.IOException;
 import java.io.InputStreamReader;
 import java.io.Serializable;
+import java.nio.charset.StandardCharsets;
 import java.time.LocalDate;
 import java.time.format.DateTimeFormatter;
 import java.time.format.DateTimeFormatterBuilder;
@@ -66,6 +68,7 @@ import java.util.Set;
 import java.util.stream.Collectors;
 
 /**
+ * TODO: [HUDI-8294]
  * This class provides file size updates for the latest files that hudi is consuming. These stats are at table level by default, but
  * specifying --enable-partition-stats will also show stats at the partition level. If a start date (--start-date parameter) and/or
  * end date (--end-date parameter) are specified, stats are based on files that were modified in the half-open interval
@@ -108,9 +111,9 @@ public class TableSizeStats implements Serializable {
   // Spark context
   private transient JavaSparkContext jsc;
   // config
-  private Config cfg;
+  private final Config cfg;
   // Properties with source, hoodie client, key generator etc.
-  private TypedProperties props;
+  private final TypedProperties props;
 
   public TableSizeStats(JavaSparkContext jsc, Config cfg) {
     this.jsc = jsc;
@@ -274,8 +277,9 @@ public class TableSizeStats implements Serializable {
         .enable(isMetadataEnabled(basePath, jsc))
         .build();
     HoodieSparkEngineContext engineContext = new HoodieSparkEngineContext(jsc);
-    HoodieTableMetadata tableMetadata = HoodieTableMetadata.create(engineContext, metadataConfig, basePath);
-    SerializableConfiguration serializableConfiguration = new SerializableConfiguration(jsc.hadoopConfiguration());
+    StorageConfiguration<?> storageConf = HadoopFSUtils.getStorageConfWithCopy(jsc.hadoopConfiguration());
+    HoodieTableMetadata tableMetadata = HoodieTableMetadata.create(
+        engineContext, new HoodieHadoopStorage(basePath, storageConf), metadataConfig, basePath);
 
     List<String> allPartitions = tableMetadata.getAllPartitionPaths();
 
@@ -311,12 +315,12 @@ public class TableSizeStats implements Serializable {
           || (startDate != null && endDate != null && ((partitionDate.isEqual(startDate) || partitionDate.isAfter(startDate)) && partitionDate.isBefore(endDate)))) {
         HoodieTableMetaClient metaClientLocal = HoodieTableMetaClient.builder()
             .setBasePath(basePath)
-            .setConf(serializableConfiguration.get()).build();
+            .setConf(storageConf.newInstance()).build();
         HoodieMetadataConfig metadataConfig1 = HoodieMetadataConfig.newBuilder()
             .enable(false)
             .build();
         HoodieTableFileSystemView fileSystemView = FileSystemViewManager
-            .createInMemoryFileSystemView(new HoodieLocalEngineContext(serializableConfiguration.get()),
+            .createInMemoryFileSystemView(new HoodieLocalEngineContext(storageConf),
                 metaClientLocal, metadataConfig1);
         List<HoodieBaseFile> baseFiles = fileSystemView.getLatestBaseFiles(partition).collect(Collectors.toList());
 
@@ -350,7 +354,7 @@ public class TableSizeStats implements Serializable {
   private static boolean isMetadataEnabled(String basePath, JavaSparkContext jsc) {
     HoodieTableMetaClient metaClient = HoodieTableMetaClient.builder()
         .setBasePath(basePath)
-        .setConf(jsc.hadoopConfiguration()).build();
+        .setConf(HadoopFSUtils.getStorageConfWithCopy(jsc.hadoopConfiguration())).build();
 
     Set<String> partitions = metaClient.getTableConfig().getMetadataPartitions();
     return !partitions.isEmpty() && partitions.contains("files");
@@ -363,7 +367,7 @@ public class TableSizeStats implements Serializable {
         Option.ofNullable(hadoopConf).orElseGet(Configuration::new)
     );
 
-    try (BufferedReader reader = new BufferedReader(new InputStreamReader(fs.open(new Path(propsPath))))) {
+    try (BufferedReader reader = new BufferedReader(new InputStreamReader(fs.open(new Path(propsPath)), StandardCharsets.UTF_8))) {
       String line = reader.readLine();
       while (line != null) {
         filePaths.add(line);

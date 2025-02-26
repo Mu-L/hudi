@@ -19,28 +19,29 @@
 
 package org.apache.hudi.common.testutils.reader;
 
-import org.apache.hudi.common.config.TypedProperties;
+import org.apache.hudi.common.config.HoodieConfig;
+import org.apache.hudi.common.config.RecordMergeMode;
 import org.apache.hudi.common.engine.HoodieReaderContext;
 import org.apache.hudi.common.model.DefaultHoodieRecordPayload;
 import org.apache.hudi.common.model.HoodieAvroIndexedRecord;
 import org.apache.hudi.common.model.HoodieAvroRecordMerger;
+import org.apache.hudi.common.model.HoodieFileFormat;
 import org.apache.hudi.common.model.HoodieRecord;
 import org.apache.hudi.common.model.HoodieRecordMerger;
-import org.apache.hudi.common.util.ConfigUtils;
 import org.apache.hudi.common.util.Option;
 import org.apache.hudi.common.util.SpillableMapUtils;
 import org.apache.hudi.common.util.collection.ClosableIterator;
 import org.apache.hudi.exception.HoodieException;
-import org.apache.hudi.hadoop.fs.HadoopFSUtils;
-import org.apache.hudi.io.storage.HoodieAvroParquetReader;
+import org.apache.hudi.io.storage.HoodieAvroFileReader;
+import org.apache.hudi.io.storage.HoodieIOFactory;
+import org.apache.hudi.storage.HoodieStorage;
+import org.apache.hudi.storage.StoragePath;
 
 import org.apache.avro.Schema;
 import org.apache.avro.generic.GenericData;
+import org.apache.avro.generic.GenericRecord;
 import org.apache.avro.generic.GenericRecordBuilder;
 import org.apache.avro.generic.IndexedRecord;
-import org.apache.hadoop.conf.Configuration;
-import org.apache.hadoop.fs.FileSystem;
-import org.apache.hadoop.fs.Path;
 
 import java.io.IOException;
 import java.util.List;
@@ -49,7 +50,6 @@ import java.util.function.UnaryOperator;
 import java.util.stream.Collectors;
 import java.util.stream.IntStream;
 
-import static org.apache.hudi.common.model.HoodieRecordMerger.DEFAULT_MERGER_STRATEGY_UUID;
 import static org.apache.hudi.common.testutils.reader.HoodieFileSliceTestUtils.ROW_KEY;
 
 public class HoodieTestReaderContext extends HoodieReaderContext<IndexedRecord> {
@@ -64,20 +64,17 @@ public class HoodieTestReaderContext extends HoodieReaderContext<IndexedRecord> 
   }
 
   @Override
-  public FileSystem getFs(String path, Configuration conf) {
-    return HadoopFSUtils.getFs(path, conf);
-  }
-
-  @Override
   public ClosableIterator<IndexedRecord> getFileRecordIterator(
-      Path filePath,
+      StoragePath filePath,
       long start,
       long length,
       Schema dataSchema,
       Schema requiredSchema,
-      Configuration conf
+      HoodieStorage storage
   ) throws IOException {
-    HoodieAvroParquetReader reader = new HoodieAvroParquetReader(conf, filePath);
+    HoodieAvroFileReader reader = (HoodieAvroFileReader) HoodieIOFactory.getIOFactory(storage)
+        .getReaderFactory(HoodieRecord.HoodieRecordType.AVRO).getFileReader(new HoodieConfig(),
+            filePath, HoodieFileFormat.PARQUET, Option.empty());
     return reader.getIndexedRecordIterator(dataSchema, requiredSchema);
   }
 
@@ -87,20 +84,16 @@ public class HoodieTestReaderContext extends HoodieReaderContext<IndexedRecord> 
   }
 
   @Override
-  public HoodieRecordMerger getRecordMerger(String mergerStrategy) {
-    // Utilize the custom merger if provided.
-    if (customMerger.isPresent()) {
-      return customMerger.get();
-    }
+  public GenericRecord convertToAvroRecord(IndexedRecord record, Schema schema) {
+    return (GenericRecord) record;
+  }
 
-    // Otherwise.
-    switch (mergerStrategy) {
-      case DEFAULT_MERGER_STRATEGY_UUID:
-        return new HoodieAvroRecordMerger();
-      default:
-        throw new HoodieException(
-            "The merger strategy UUID is not supported: " + mergerStrategy);
+  @Override
+  public Option<HoodieRecordMerger> getRecordMerger(RecordMergeMode mergeMode, String mergeStrategyId, String mergeImplClasses) {
+    if (mergeMode == RecordMergeMode.CUSTOM) {
+      return customMerger;
     }
+    return Option.of(HoodieAvroRecordMerger.INSTANCE);
   }
 
   @Override
@@ -111,26 +104,6 @@ public class HoodieTestReaderContext extends HoodieReaderContext<IndexedRecord> 
   @Override
   public String getRecordKey(IndexedRecord record, Schema schema) {
     return getFieldValueFromIndexedRecord(record, schema, ROW_KEY).toString();
-  }
-
-  @Override
-  public Comparable getOrderingValue(
-      Option<IndexedRecord> recordOpt,
-      Map<String, Object> metadataMap,
-      Schema schema,
-      TypedProperties props
-  ) {
-    if (metadataMap.containsKey(INTERNAL_META_ORDERING_FIELD)) {
-      return (Comparable) metadataMap.get(INTERNAL_META_ORDERING_FIELD);
-    }
-
-    if (!recordOpt.isPresent()) {
-      return 0;
-    }
-
-    String orderingFieldName = ConfigUtils.getOrderingField(props);
-    Object value = getFieldValueFromIndexedRecord(recordOpt.get(), schema, orderingFieldName);
-    return value != null ? (Comparable) value : 0;
   }
 
   @Override
@@ -163,14 +136,18 @@ public class HoodieTestReaderContext extends HoodieReaderContext<IndexedRecord> 
   }
 
   @Override
-  public ClosableIterator<IndexedRecord> mergeBootstrapReaders(
-      ClosableIterator<IndexedRecord> skeletonFileIterator,
-      ClosableIterator<IndexedRecord> dataFileIterator) {
+  public ClosableIterator<IndexedRecord> mergeBootstrapReaders(ClosableIterator<IndexedRecord> skeletonFileIterator,
+                                                               Schema skeletonRequiredSchema,
+                                                               ClosableIterator<IndexedRecord> dataFileIterator,
+                                                               Schema dataRequiredSchema) {
     return null;
   }
 
   @Override
-  public UnaryOperator<IndexedRecord> projectRecord(Schema from, Schema to) {
+  public UnaryOperator<IndexedRecord> projectRecord(Schema from, Schema to, Map<String, String> renamedColumns) {
+    if (!renamedColumns.isEmpty()) {
+      throw new UnsupportedOperationException("Schema evolution is not supported for the test reader context");
+    }
     Map<String, Integer> fromFields = IntStream.range(0, from.getFields().size())
         .boxed()
         .collect(Collectors.toMap(
@@ -214,6 +191,9 @@ public class HoodieTestReaderContext extends HoodieReaderContext<IndexedRecord> 
       String fieldName
   ) {
     Schema.Field field = recordSchema.getField(fieldName);
+    if (field == null) {
+      return null;
+    }
     int pos = field.pos();
     return record.get(pos);
   }

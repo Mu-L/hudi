@@ -72,15 +72,6 @@ public class HoodieCommonConfig extends HoodieConfig {
           + "This enables us, to always extend the table's schema during evolution and never lose the data (when, for "
           + "ex, existing column is being dropped in a new batch)");
 
-  public static final ConfigProperty<Boolean> MAKE_NEW_COLUMNS_NULLABLE = ConfigProperty
-      .key("hoodie.datasource.write.new.columns.nullable")
-      .defaultValue(false)
-      .markAdvanced()
-      .sinceVersion("0.14.0")
-      .withDocumentation("When a non-nullable column is added to datasource during a write operation, the write "
-          + " operation will fail schema compatibility check. Set this option to true will make the newly added "
-          + " column nullable to successfully complete the write operation.");
-
   public static final ConfigProperty<String> SET_NULL_FOR_MISSING_COLUMNS = ConfigProperty
       .key("hoodie.write.set.null.for.missing.columns")
       .defaultValue("false")
@@ -145,6 +136,20 @@ public class HoodieCommonConfig extends HoodieConfig {
       .markAdvanced()
       .withDocumentation("Property to control the max memory in bytes for dfs input stream buffer size");
 
+  public static final ConfigProperty<Boolean> HOODIE_FILE_INDEX_USE_SPILLABLE_MAP = ConfigProperty
+      .key("hoodie.file.index.cache.use.spillable.map")
+      .defaultValue(false)
+      .sinceVersion("1.1.0")
+      .markAdvanced()
+      .withDocumentation("Property to enable spillable map for caching input file slices in org.apache.hudi.BaseHoodieTableFileIndex");
+
+  public static final ConfigProperty<Long> HOODIE_FILE_INDEX_SPILLABLE_MEMORY = ConfigProperty
+      .key("hoodie.file.index.cache.spillable.mem")
+      .defaultValue(500 * 1024L * 1024L) // 500 MB
+      .markAdvanced()
+      .sinceVersion("1.1.0")
+      .withDocumentation("Amount of memory to be used in bytes for holding cachedAllInputFileSlices in org.apache.hudi.BaseHoodieTableFileIndex.");
+  
   public static final long DEFAULT_MAX_MEMORY_FOR_SPILLABLE_MAP_IN_BYTES = 1024 * 1024 * 1024L;
 
   public ExternalSpillableMap.DiskMapType getSpillableDiskMapType() {

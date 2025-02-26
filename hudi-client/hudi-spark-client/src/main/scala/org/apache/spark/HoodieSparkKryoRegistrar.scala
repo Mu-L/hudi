@@ -18,14 +18,19 @@
 
 package org.apache.spark
 
-import com.esotericsoftware.kryo.io.{Input, Output}
-import com.esotericsoftware.kryo.{Kryo, Serializer}
-import com.esotericsoftware.kryo.serializers.JavaSerializer
 import org.apache.hudi.client.model.HoodieInternalRow
-import org.apache.hudi.common.config.SerializableConfiguration
 import org.apache.hudi.common.model.{HoodieKey, HoodieSparkRecord}
 import org.apache.hudi.common.util.HoodieCommonKryoRegistrar
 import org.apache.hudi.config.HoodieWriteConfig
+import org.apache.hudi.io.HoodieKeyLookupResult
+import org.apache.hudi.storage.hadoop.HadoopStorageConfiguration
+import org.apache.hudi.table.{HoodieSparkCopyOnWriteTable, HoodieSparkMergeOnReadTable}
+
+import com.esotericsoftware.kryo.{Kryo, Serializer}
+import com.esotericsoftware.kryo.io.{Input, Output}
+import com.esotericsoftware.kryo.serializers.JavaSerializer
+import com.google.protobuf.Message
+import com.twitter.chill.protobuf.ProtobufSerializer
 import org.apache.spark.serializer.KryoRegistrator
 
 /**
@@ -58,10 +63,18 @@ class HoodieSparkKryoRegistrar extends HoodieCommonKryoRegistrar with KryoRegist
 
     kryo.register(classOf[HoodieSparkRecord])
     kryo.register(classOf[HoodieInternalRow])
+    kryo.register(classOf[HoodieSparkCopyOnWriteTable[_]])
+    kryo.register(classOf[HoodieSparkMergeOnReadTable[_]])
+    kryo.register(classOf[HoodieKeyLookupResult])
 
-    // NOTE: Hadoop's configuration is not a serializable object by itself, and hence
-    //       we're relying on [[SerializableConfiguration]] wrapper to work it around
-    kryo.register(classOf[SerializableConfiguration], new JavaSerializer())
+    // NOTE: This entry is used for [[SerializableConfiguration]] before since
+    //       Hadoop's configuration is not a serializable object by itself, and hence
+    //       we're relying on [[SerializableConfiguration]] wrapper to work it around.
+    //       We cannot remove this entry; otherwise the ordering is changed.
+    //       So we replace it with [[HadoopStorageConfiguration]] for Spark.
+    kryo.register(classOf[HadoopStorageConfiguration], new JavaSerializer())
+    // NOTE: Protobuf objects are not serializable by default using kryo, need to register them explicitly.
+    kryo.addDefaultSerializer(classOf[Message], new ProtobufSerializer())
   }
 
   /**

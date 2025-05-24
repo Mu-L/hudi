@@ -31,6 +31,7 @@ import org.apache.hudi.common.table.read.TestHoodieFileGroupReaderBase;
 import org.apache.hudi.common.testutils.HoodieTestDataGenerator;
 import org.apache.hudi.common.util.CollectionUtils;
 import org.apache.hudi.common.util.Option;
+import org.apache.hudi.common.util.collection.ClosableIterator;
 import org.apache.hudi.configuration.FlinkOptions;
 import org.apache.hudi.configuration.HadoopConfigurations;
 import org.apache.hudi.exception.HoodieException;
@@ -109,7 +110,8 @@ public class TestHoodieFileGroupReaderOnFlink extends TestHoodieFileGroupReaderB
         storageConf,
         () -> InternalSchemaManager.DISABLED,
         Collections.emptyList(),
-        metaClient.getTableConfig());
+        metaClient.getTableConfig(),
+        Option.empty());
   }
 
   @Override
@@ -123,10 +125,11 @@ public class TestHoodieFileGroupReaderOnFlink extends TestHoodieFileGroupReaderB
       List<RowData> recordList,
       Schema recordSchema) throws IOException {
     RowDataSerializer rowDataSerializer = RowDataAvroQueryContexts.getRowDataSerializer(recordSchema);
-    fileGroupReader.initRecordIterators();
-    while (fileGroupReader.hasNext()) {
-      RowData rowData = rowDataSerializer.copy(fileGroupReader.next());
-      recordList.add(rowData);
+    try (ClosableIterator<RowData> iterator = fileGroupReader.getClosableIterator()) {
+      while (iterator.hasNext()) {
+        RowData rowData = rowDataSerializer.copy(iterator.next());
+        recordList.add(rowData);
+      }
     }
   }
 
@@ -162,7 +165,7 @@ public class TestHoodieFileGroupReaderOnFlink extends TestHoodieFileGroupReaderB
     HoodieTableConfig tableConfig = Mockito.mock(HoodieTableConfig.class);
     when(tableConfig.populateMetaFields()).thenReturn(true);
     FlinkRowDataReaderContext readerContext =
-        new FlinkRowDataReaderContext(getStorageConf(), () -> InternalSchemaManager.DISABLED, Collections.emptyList(), tableConfig);
+        new FlinkRowDataReaderContext(getStorageConf(), () -> InternalSchemaManager.DISABLED, Collections.emptyList(), tableConfig, Option.empty());
     Schema schema = SchemaBuilder.builder()
         .record("test")
         .fields()
@@ -180,7 +183,7 @@ public class TestHoodieFileGroupReaderOnFlink extends TestHoodieFileGroupReaderB
     HoodieTableConfig tableConfig = Mockito.mock(HoodieTableConfig.class);
     when(tableConfig.populateMetaFields()).thenReturn(true);
     FlinkRowDataReaderContext readerContext =
-        new FlinkRowDataReaderContext(getStorageConf(), () -> InternalSchemaManager.DISABLED, Collections.emptyList(), tableConfig);
+        new FlinkRowDataReaderContext(getStorageConf(), () -> InternalSchemaManager.DISABLED, Collections.emptyList(), tableConfig, Option.empty());
     Schema schema = SchemaBuilder.builder()
         .record("test")
         .fields()
@@ -198,7 +201,7 @@ public class TestHoodieFileGroupReaderOnFlink extends TestHoodieFileGroupReaderB
     when(tableConfig.populateMetaFields()).thenReturn(false);
     when(tableConfig.getRecordKeyFields()).thenReturn(Option.of(new String[] {"field1"}));
     FlinkRowDataReaderContext readerContext =
-        new FlinkRowDataReaderContext(getStorageConf(), () -> InternalSchemaManager.DISABLED, Collections.emptyList(), tableConfig);
+        new FlinkRowDataReaderContext(getStorageConf(), () -> InternalSchemaManager.DISABLED, Collections.emptyList(), tableConfig, Option.empty());
     Schema schema = SchemaBuilder.builder()
         .record("test")
         .fields()
@@ -216,7 +219,7 @@ public class TestHoodieFileGroupReaderOnFlink extends TestHoodieFileGroupReaderB
     when(tableConfig.populateMetaFields()).thenReturn(false);
     when(tableConfig.getRecordKeyFields()).thenReturn(Option.of(new String[] {"field1", "field2"}));
     FlinkRowDataReaderContext readerContext =
-        new FlinkRowDataReaderContext(getStorageConf(), () -> InternalSchemaManager.DISABLED, Collections.emptyList(), tableConfig);
+        new FlinkRowDataReaderContext(getStorageConf(), () -> InternalSchemaManager.DISABLED, Collections.emptyList(), tableConfig, Option.empty());
 
     Schema schema = SchemaBuilder.builder()
         .record("test")

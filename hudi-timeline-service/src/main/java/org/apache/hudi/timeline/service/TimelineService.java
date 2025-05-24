@@ -111,6 +111,9 @@ public class TimelineService {
     @Parameter(names = {"--enable-marker-requests", "-em"}, description = "Enable handling of marker-related requests")
     public boolean enableMarkerRequests = false;
 
+    @Parameter(names = {"--enable-remote-partitioner"}, description = "Enable remote partitioner")
+    public boolean enableRemotePartitioner = false;
+
     @Parameter(names = {"--marker-batch-threads", "-mbt"}, description = "Number of threads to use for batch processing marker creation requests")
     public int markerBatchNumThreads = 20;
 
@@ -185,6 +188,7 @@ public class TimelineService {
       private Long asyncConflictDetectorInitialDelayMs = 0L;
       private Long asyncConflictDetectorPeriodMs = 30000L;
       private Long maxAllowableHeartbeatIntervalInMs = 120000L;
+      private boolean enableRemotePartitioner = false;
 
       public Builder() {
       }
@@ -236,6 +240,11 @@ public class TimelineService {
 
       public Builder enableMarkerRequests(boolean enableMarkerRequests) {
         this.enableMarkerRequests = enableMarkerRequests;
+        return this;
+      }
+
+      public Builder enableRemotePartitioner(boolean enableRemotePartitioner) {
+        this.enableRemotePartitioner = enableRemotePartitioner;
         return this;
       }
 
@@ -296,6 +305,7 @@ public class TimelineService {
         config.async = this.async;
         config.compress = this.compress;
         config.enableMarkerRequests = this.enableMarkerRequests;
+        config.enableRemotePartitioner = this.enableRemotePartitioner;
         config.markerBatchNumThreads = this.markerBatchNumThreads;
         config.markerBatchIntervalMs = this.markerBatchIntervalMs;
         config.markerParallelism = this.markerParallelism;
@@ -404,7 +414,7 @@ public class TimelineService {
   }
 
   public void close() {
-    LOG.info("Closing Timeline Service");
+    LOG.info("Closing Timeline Service with port " + serverPort);
     if (requestHandler != null) {
       this.requestHandler.stop();
     }
@@ -413,7 +423,7 @@ public class TimelineService {
       this.app = null;
     }
     this.fsViewsManager.close();
-    LOG.info("Closed Timeline Service");
+    LOG.info("Closed Timeline Service with port " + serverPort);
   }
 
   public void unregisterBasePath(String basePath) {

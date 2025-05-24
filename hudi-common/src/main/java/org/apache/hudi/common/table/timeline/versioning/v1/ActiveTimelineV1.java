@@ -142,11 +142,16 @@ public class ActiveTimelineV1 extends BaseTimelineV1 implements HoodieActiveTime
   }
 
   @Override
-  public void createRequestedCommitWithReplaceMetadata(String instantTime, String actionType) {
+  public HoodieInstant createRequestedCommitWithReplaceMetadata(String instantTime, String actionType) {
     HoodieInstant instant = instantGenerator.createNewInstant(HoodieInstant.State.REQUESTED, actionType, instantTime);
     LOG.info("Creating a new instant {}", instant);
     // Create the request replace file
     createFileInMetaPath(instantFileNameGenerator.getFileName(instant), Option.of(new HoodieRequestedReplaceMetadata()), false);
+    return instant;
+  }
+
+  public String createCompletionTime() {
+    return this.metaClient.createNewInstantTime(false);
   }
 
   @Override
@@ -160,6 +165,11 @@ public class ActiveTimelineV1 extends BaseTimelineV1 implements HoodieActiveTime
 
   @Override
   public <T> void saveAsComplete(boolean shouldLock, HoodieInstant instant, Option<T> metadata) {
+    saveAsComplete(instant, metadata);
+  }
+
+  @Override
+  public <T> void saveAsComplete(boolean shouldLock, HoodieInstant instant, Option<T> metadata, Option<String> completionTimeOpt) {
     saveAsComplete(instant, metadata);
   }
 
@@ -396,11 +406,11 @@ public class ActiveTimelineV1 extends BaseTimelineV1 implements HoodieActiveTime
   }
 
   @Override
-  public HoodieInstant transitionCleanRequestedToInflight(HoodieInstant requestedInstant, Option<HoodieCleanerPlan> metadata) {
+  public HoodieInstant transitionCleanRequestedToInflight(HoodieInstant requestedInstant) {
     ValidationUtils.checkArgument(requestedInstant.getAction().equals(HoodieTimeline.CLEAN_ACTION));
     ValidationUtils.checkArgument(requestedInstant.isRequested());
     HoodieInstant inflight = instantGenerator.createNewInstant(HoodieInstant.State.INFLIGHT, CLEAN_ACTION, requestedInstant.requestedTime());
-    transitionState(requestedInstant, inflight, metadata);
+    transitionState(requestedInstant, inflight, Option.empty());
     return inflight;
   }
 

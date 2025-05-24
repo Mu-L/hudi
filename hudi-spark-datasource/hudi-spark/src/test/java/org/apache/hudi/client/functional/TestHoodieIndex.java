@@ -18,6 +18,7 @@
 
 package org.apache.hudi.client.functional;
 
+import org.apache.hudi.client.WriteClientTestUtils;
 import org.apache.hudi.client.WriteStatus;
 import org.apache.hudi.common.config.HoodieMetadataConfig;
 import org.apache.hudi.common.config.HoodieStorageConfig;
@@ -146,7 +147,6 @@ public class TestHoodieIndex extends TestHoodieMetadataBase {
             .withPayloadOrderingField("number").build())
         .withRollbackUsingMarkers(rollbackUsingMarkers)
         .withIndexConfig(indexBuilder.build())
-        .withAutoCommit(false)
         .withMetadataConfig(metadataConfigBuilder.build())
         .withLayoutConfig(HoodieLayoutConfig.newBuilder().fromProperties(indexBuilder.build().getProps())
             .withLayoutPartitioner(SparkBucketIndexPartitioner.class.getName()).build())
@@ -235,7 +235,7 @@ public class TestHoodieIndex extends TestHoodieMetadataBase {
 
     // Insert totalRecords records
     String newCommitTime = writeClient.createNewInstantTime();
-    writeClient.startCommitWithTime(newCommitTime);
+    WriteClientTestUtils.startCommitWithTime(writeClient, newCommitTime);
     JavaRDD<WriteStatus> writeStatusRdd = writeClient.upsert(writtenRecords, newCommitTime);
     List<WriteStatus> writeStatuses = writeStatusRdd.collect();
     assertNoWriteErrors(writeStatuses);
@@ -276,7 +276,7 @@ public class TestHoodieIndex extends TestHoodieMetadataBase {
     // Rollback the last commit
     writeClient.rollback(newCommitTime);
 
-    hoodieTable = HoodieSparkTable.create(config, context, metaClient);
+    hoodieTable = HoodieSparkTable.create(config, context);
     // Now tagLocation for these records, hbaseIndex should not tag them since it was a rolled
     // back commit
     javaRDD = tagLocation(index, writtenRecords, hoodieTable);
@@ -300,7 +300,7 @@ public class TestHoodieIndex extends TestHoodieMetadataBase {
     assertTrue(javaRDD.filter(record -> record.isCurrentLocationKnown()).collect().isEmpty());
 
     // Insert totalRecords records
-    writeClient.startCommitWithTime(newCommitTime);
+    WriteClientTestUtils.startCommitWithTime(writeClient, newCommitTime);
     JavaRDD<WriteStatus> writeStatues = writeClient.upsert(writeRecords, newCommitTime);
     assertNoWriteErrors(writeStatues.collect());
 
@@ -351,7 +351,7 @@ public class TestHoodieIndex extends TestHoodieMetadataBase {
     HoodieSparkTable hoodieTable = HoodieSparkTable.create(config, context, metaClient);
 
     String newCommitTime = writeClient.createNewInstantTime();
-    writeClient.startCommitWithTime(newCommitTime);
+    WriteClientTestUtils.startCommitWithTime(writeClient, newCommitTime);
     JavaRDD<WriteStatus> writeStatues = writeClient.upsert(writeRecords, newCommitTime);
     JavaRDD<HoodieRecord> javaRDD1 = tagLocation(index, writeRecords, hoodieTable);
 
@@ -592,7 +592,7 @@ public class TestHoodieIndex extends TestHoodieMetadataBase {
     String newCommitTime = writeClient.createNewInstantTime();
     List<HoodieRecord> records = getInserts();
     JavaRDD<HoodieRecord> writeRecords = jsc.parallelize(records, 1);
-    writeClient.startCommitWithTime(newCommitTime);
+    WriteClientTestUtils.startCommitWithTime(writeClient, newCommitTime);
     JavaRDD<WriteStatus> writeStatues = writeClient.upsert(writeRecords, newCommitTime);
     assertNoWriteErrors(writeStatues.collect());
     writeClient.commit(newCommitTime, writeStatues);
@@ -626,7 +626,7 @@ public class TestHoodieIndex extends TestHoodieMetadataBase {
     final int numDeletes = records.size() / 2;
     List<HoodieKey> keysToDelete = records.stream().limit(numDeletes).map(r -> new HoodieKey(r.getRecordKey(), r.getPartitionPath())).collect(Collectors.toList());
     String deleteCommitTime = writeClient.createNewInstantTime();
-    writeClient.startCommitWithTime(deleteCommitTime);
+    WriteClientTestUtils.startCommitWithTime(writeClient, deleteCommitTime);
     writeStatues = writeClient.delete(jsc.parallelize(keysToDelete, 1), deleteCommitTime);
     assertNoWriteErrors(writeStatues.collect());
     writeClient.commit(deleteCommitTime, writeStatues);

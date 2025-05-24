@@ -22,6 +22,7 @@ import org.apache.hudi.avro.model.HoodieCompactionOperation;
 import org.apache.hudi.avro.model.HoodieCompactionPlan;
 import org.apache.hudi.client.SparkRDDReadClient;
 import org.apache.hudi.client.SparkRDDWriteClient;
+import org.apache.hudi.client.WriteClientTestUtils;
 import org.apache.hudi.client.WriteStatus;
 import org.apache.hudi.common.config.HoodieMetadataConfig;
 import org.apache.hudi.common.config.HoodieStorageConfig;
@@ -78,7 +79,6 @@ public class CompactionTestBase extends HoodieClientTestBase {
     return HoodieWriteConfig.newBuilder().withPath(basePath)
         .withSchema(TRIP_EXAMPLE_SCHEMA)
         .withParallelism(2, 2)
-        .withAutoCommit(autoCommit)
         .withMetadataConfig(HoodieMetadataConfig.newBuilder().build())
         .withCompactionConfig(HoodieCompactionConfig.newBuilder().compactionSmallFileSize(1024 * 1024 * 1024)
             .withInlineCompaction(false).withMaxNumDeltaCommitsBeforeCompaction(1).build())
@@ -130,13 +130,12 @@ public class CompactionTestBase extends HoodieClientTestBase {
       String firstInstant = deltaInstants.get(0);
       deltaInstants = deltaInstants.subList(1, deltaInstants.size());
       JavaRDD<HoodieRecord> writeRecords = jsc.parallelize(records, 1);
-      client.startCommitWithTime(firstInstant);
+      WriteClientTestUtils.startCommitWithTime(client, firstInstant);
       JavaRDD<WriteStatus> statuses = client.upsert(writeRecords, firstInstant);
       List<WriteStatus> statusList = statuses.collect();
 
-      if (!cfg.shouldAutoCommit()) {
-        client.commit(firstInstant, statuses);
-      }
+
+      client.commit(firstInstant, jsc.parallelize(statusList));
       assertNoWriteErrors(statusList);
       metaClient = createMetaClient(cfg.getBasePath());
       HoodieTable hoodieTable = getHoodieTable(metaClient, cfg);
@@ -197,11 +196,8 @@ public class CompactionTestBase extends HoodieClientTestBase {
                                  HoodieWriteConfig cfg, int expectedNumRecs, boolean hasDeltaCommitAfterPendingCompaction) throws IOException {
 
     HoodieWriteMetadata<?> compactionMetadata = client.compact(compactionInstantTime);
-    if (!cfg.shouldAutoCommit()) {
-      if (compactionMetadata.getCommitMetadata().isPresent()) {
-        client.commitCompaction(compactionInstantTime, compactionMetadata.getCommitMetadata().get(), Option.empty());
-      }
-    }
+    client.commitCompaction(compactionInstantTime, compactionMetadata, Option.empty());
+    assertTrue(metaClient.reloadActiveTimeline().filterCompletedInstants().containsInstant(compactionInstantTime));
     assertFalse(WriteMarkersFactory.get(cfg.getMarkersType(), table, compactionInstantTime).doesMarkerDirExist());
     List<FileSlice> fileSliceList = getCurrentLatestFileSlices(table);
     assertTrue(fileSliceList.stream().findAny().isPresent(), "Ensure latest file-slices are not empty");
@@ -234,7 +230,8 @@ public class CompactionTestBase extends HoodieClientTestBase {
   protected void executeCompactionWithReplacedFiles(String compactionInstantTime, SparkRDDWriteClient client, HoodieTable table,
                                    HoodieWriteConfig cfg, String[] partitions, Set<HoodieFileGroupId> replacedFileIds) throws IOException {
 
-    client.compact(compactionInstantTime);
+    client.commitCompaction(compactionInstantTime, client.compact(compactionInstantTime), Option.of(table));
+    assertTrue(metaClient.reloadActiveTimeline().filterCompletedInstants().containsInstant(compactionInstantTime));
     List<FileSlice> fileSliceList = getCurrentLatestFileSlices(table);
     assertTrue(fileSliceList.stream().findAny().isPresent(), "Ensure latest file-slices are not empty");
     assertFalse(fileSliceList.stream()
@@ -260,18 +257,18 @@ public class CompactionTestBase extends HoodieClientTestBase {
                                                     HoodieTableMetaClient metaClient, HoodieWriteConfig cfg, boolean skipCommit) {
     JavaRDD<HoodieRecord> writeRecords = jsc.parallelize(records, 1);
 
-    client.startCommitWithTime(instantTime);
+    WriteClientTestUtils.startCommitWithTime(client, instantTime);
 
     JavaRDD<WriteStatus> statuses = client.upsert(writeRecords, instantTime);
     List<WriteStatus> statusList = statuses.collect();
     assertNoWriteErrors(statusList);
-    if (!cfg.shouldAutoCommit() && !skipCommit) {
+    if (!skipCommit) {
       client.commit(instantTime, statuses);
     }
 
     Option<HoodieInstant> deltaCommit =
         metaClient.getActiveTimeline().reload().getDeltaCommitTimeline().filterCompletedInstants().lastInstant();
-    if (skipCommit && !cfg.shouldAutoCommit()) {
+    if (skipCommit) {
       assertTrue(deltaCommit.get().requestedTime().compareTo(instantTime) < 0,
           "Delta commit should not be latest instant");
     } else {

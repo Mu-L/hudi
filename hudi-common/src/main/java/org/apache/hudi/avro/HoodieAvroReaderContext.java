@@ -26,6 +26,7 @@ import org.apache.hudi.common.engine.HoodieReaderContext;
 import org.apache.hudi.common.model.HoodieAvroIndexedRecord;
 import org.apache.hudi.common.model.HoodieAvroRecordMerger;
 import org.apache.hudi.common.model.HoodieFileFormat;
+import org.apache.hudi.common.model.HoodieKey;
 import org.apache.hudi.common.model.HoodieRecord;
 import org.apache.hudi.common.model.HoodieRecordMerger;
 import org.apache.hudi.common.model.OverwriteWithLatestMerger;
@@ -98,6 +99,11 @@ public class HoodieAvroReaderContext extends HoodieReaderContext<IndexedRecord> 
   }
 
   @Override
+  public IndexedRecord getDeleteRow(IndexedRecord record, String recordKey) {
+    throw new UnsupportedOperationException("Not supported for " + this.getClass().getSimpleName());
+  }
+
+  @Override
   public Option<HoodieRecordMerger> getRecordMerger(RecordMergeMode mergeMode, String mergeStrategyId, String mergeImplClasses) {
     switch (mergeMode) {
       case EVENT_TIME_ORDERING:
@@ -121,15 +127,21 @@ public class HoodieAvroReaderContext extends HoodieReaderContext<IndexedRecord> 
   }
 
   @Override
+  public String getMetaFieldValue(IndexedRecord record, int pos) {
+    return record.get(pos).toString();
+  }
+
+  @Override
   public HoodieRecord<IndexedRecord> constructHoodieRecord(BufferedRecord<IndexedRecord> bufferedRecord) {
     if (bufferedRecord.isDelete()) {
       return SpillableMapUtils.generateEmptyPayload(
           bufferedRecord.getRecordKey(),
-          null,
+          partitionPath,
           bufferedRecord.getOrderingValue(),
           payloadClass);
     }
-    return new HoodieAvroIndexedRecord(bufferedRecord.getRecord());
+    HoodieKey hoodieKey = new HoodieKey(bufferedRecord.getRecordKey(), partitionPath);
+    return new HoodieAvroIndexedRecord(hoodieKey, bufferedRecord.getRecord());
   }
 
   @Override

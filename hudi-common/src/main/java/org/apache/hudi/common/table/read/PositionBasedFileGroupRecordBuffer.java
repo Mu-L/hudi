@@ -68,12 +68,12 @@ public class PositionBasedFileGroupRecordBuffer<T> extends KeyBasedFileGroupReco
   public PositionBasedFileGroupRecordBuffer(HoodieReaderContext<T> readerContext,
                                             HoodieTableMetaClient hoodieTableMetaClient,
                                             RecordMergeMode recordMergeMode,
-                                            Option<String> partitionNameOverrideOpt,
-                                            Option<String[]> partitionPathFieldOpt,
                                             String baseFileInstantTime,
                                             TypedProperties props,
-                                            HoodieReadStats readStats) {
-    super(readerContext, hoodieTableMetaClient, recordMergeMode, partitionNameOverrideOpt, partitionPathFieldOpt, props, readStats);
+                                            HoodieReadStats readStats,
+                                            Option<String> orderingFieldName,
+                                            boolean emitDelete) {
+    super(readerContext, hoodieTableMetaClient, recordMergeMode, props, readStats, orderingFieldName, emitDelete);
     this.baseFileInstantTime = baseFileInstantTime;
   }
 
@@ -131,7 +131,7 @@ public class PositionBasedFileGroupRecordBuffer<T> extends KeyBasedFileGroupReco
 
         long recordPosition = recordPositions.get(recordIndex++);
         T evolvedNextRecord = schemaTransformerWithEvolvedSchema.getLeft().apply(nextRecord);
-        boolean isDelete = isBuiltInDeleteRecord(evolvedNextRecord) || isCustomDeleteRecord(evolvedNextRecord);
+        boolean isDelete = isBuiltInDeleteRecord(evolvedNextRecord) || isCustomDeleteRecord(evolvedNextRecord) || isDeleteHoodieOperation(evolvedNextRecord);
         BufferedRecord<T> bufferedRecord = BufferedRecord.forRecordWithContext(evolvedNextRecord, schema, readerContext, orderingFieldName, isDelete);
         processNextDataRecord(bufferedRecord, recordPosition);
       }

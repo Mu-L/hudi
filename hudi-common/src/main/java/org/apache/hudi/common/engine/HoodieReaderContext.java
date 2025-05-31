@@ -20,15 +20,19 @@
 package org.apache.hudi.common.engine;
 
 import org.apache.hudi.common.config.RecordMergeMode;
+import org.apache.hudi.common.model.HoodieFileFormat;
 import org.apache.hudi.common.model.HoodieRecord;
 import org.apache.hudi.common.model.HoodieRecordMerger;
 import org.apache.hudi.common.table.HoodieTableConfig;
+import org.apache.hudi.common.table.log.InstantRange;
 import org.apache.hudi.common.table.read.BufferedRecord;
 import org.apache.hudi.common.table.read.FileGroupReaderSchemaHandler;
 import org.apache.hudi.common.util.LocalAvroSchemaCache;
 import org.apache.hudi.common.util.Option;
 import org.apache.hudi.common.util.collection.ClosableIterator;
+import org.apache.hudi.common.util.collection.CloseableFilterIterator;
 import org.apache.hudi.common.util.collection.Pair;
+import org.apache.hudi.expression.Predicate;
 import org.apache.hudi.keygen.KeyGenerator;
 import org.apache.hudi.storage.HoodieStorage;
 import org.apache.hudi.storage.StorageConfiguration;
@@ -65,6 +69,9 @@ import static org.apache.hudi.common.model.HoodieRecord.RECORD_KEY_METADATA_FIEL
 public abstract class HoodieReaderContext<T> {
   private final StorageConfiguration<?> storageConfiguration;
   private final BiFunction<T, Schema, String> recordKeyExtractor;
+  protected final HoodieFileFormat baseFileFormat;
+  // For general predicate pushdown.
+  protected final Option<Predicate> keyFilterOpt;
   private FileGroupReaderSchemaHandler<T> schemaHandler = null;
   private String tablePath = null;
   private String latestCommitTime = null;
@@ -73,15 +80,22 @@ public abstract class HoodieReaderContext<T> {
   private Boolean hasBootstrapBaseFile = null;
   private Boolean needsBootstrapMerge = null;
   private Boolean shouldMergeUseRecordPosition = null;
+  protected String partitionPath;
+  protected Option<InstantRange> instantRangeOpt = Option.empty();
 
   // for encoding and decoding schemas to the spillable map
   private final LocalAvroSchemaCache localAvroSchemaCache = LocalAvroSchemaCache.getInstance();
 
   protected HoodieReaderContext(StorageConfiguration<?> storageConfiguration,
-                                HoodieTableConfig tableConfig) {
+                                HoodieTableConfig tableConfig,
+                                Option<InstantRange> instantRangeOpt,
+                                Option<Predicate> keyFilterOpt) {
     this.storageConfiguration = storageConfiguration;
     this.recordKeyExtractor = tableConfig.populateMetaFields() ? metadataKeyExtractor() : virtualKeyExtractor(tableConfig.getRecordKeyFields()
         .orElseThrow(() -> new IllegalArgumentException("No record keys specified and meta fields are not populated")));
+    this.baseFileFormat = tableConfig.getBaseFileFormat();
+    this.instantRangeOpt = instantRangeOpt;
+    this.keyFilterOpt = keyFilterOpt;
   }
 
   // Getter and Setter for schemaHandler
@@ -129,6 +143,10 @@ public abstract class HoodieReaderContext<T> {
     this.hasLogFiles = hasLogFiles;
   }
 
+  public void setPartitionPath(String partitionPath) {
+    this.partitionPath = partitionPath;
+  }
+
   // Getter and Setter for hasBootstrapBaseFile
   public boolean getHasBootstrapBaseFile() {
     return hasBootstrapBaseFile;
@@ -158,6 +176,10 @@ public abstract class HoodieReaderContext<T> {
 
   public StorageConfiguration<?> getStorageConfiguration() {
     return storageConfiguration;
+  }
+
+  public Option<Predicate> getKeyFilterOpt() {
+    return keyFilterOpt;
   }
 
   /**
@@ -203,6 +225,23 @@ public abstract class HoodieReaderContext<T> {
   public abstract T convertAvroRecord(IndexedRecord avroRecord);
 
   public abstract GenericRecord convertToAvroRecord(T record, Schema schema);
+
+  /**
+   * There are two cases to handle:
+   * 1). Return the delete record if it's not null;
+   * 2). otherwise fills an empty row with record key fields and returns.
+   *
+   * <p>For case2, when `emitDelete` is true for FileGroup reader and payload for DELETE record is empty,
+   * a record key row is emitted to downstream to delete data from storage by record key with the best effort.
+   * Returns null if the primary key semantics been lost: the requested schema does not include all the record key fields.
+   *
+   * @param record    delete record
+   * @param recordKey record key
+   *
+   * @return Engine specific row which contains record key fields.
+   */
+  @Nullable
+  public abstract T getDeleteRow(T record, String recordKey);
   
   /**
    * @param mergeMode        record merge mode
@@ -224,6 +263,16 @@ public abstract class HoodieReaderContext<T> {
   public abstract Object getValue(T record, Schema schema, String fieldName);
 
   /**
+   * Get value of metadata field in a more efficient way than #getValue.
+   *
+   * @param record The record in engine-specific type.
+   * @param pos    The position of the metadata field.
+   *
+   * @return The value for the target metadata field.
+   */
+  public abstract String getMetaFieldValue(T record, int pos);
+
+  /**
    * Cast to Java boolean value.
    * If the object is not compatible with boolean type, throws.
    */
@@ -234,6 +283,29 @@ public abstract class HoodieReaderContext<T> {
       throw new IllegalArgumentException(
           "Input value type " + value.getClass() + ", cannot be cast to boolean");
     }
+  }
+
+  /**
+   * Get the {@link InstantRange} filter.
+   */
+  public Option<InstantRange> getInstantRange() {
+    return instantRangeOpt;
+  }
+
+  /**
+   * Apply the {@link InstantRange} filter to the file record iterator.
+   *
+   * @param fileRecordIterator File record iterator.
+   *
+   * @return File record iterator filter by {@link InstantRange}.
+   */
+  public ClosableIterator<T> applyInstantRangeFilter(ClosableIterator<T> fileRecordIterator) {
+    InstantRange instantRange = getInstantRange().get();
+    final Schema.Field commitTimeField = schemaHandler.getRequiredSchema().getField(HoodieRecord.COMMIT_TIME_METADATA_FIELD);
+    final int commitTimePos = commitTimeField.pos();
+    java.util.function.Predicate<T> instantFilter =
+        row -> instantRange.isInRange(getMetaFieldValue(row, commitTimePos));
+    return new CloseableFilterIterator<>(fileRecordIterator, instantFilter);
   }
 
   /**

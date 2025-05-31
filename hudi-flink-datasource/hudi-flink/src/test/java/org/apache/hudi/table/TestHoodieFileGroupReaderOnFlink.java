@@ -23,14 +23,18 @@ import org.apache.hudi.common.config.HoodieStorageConfig;
 import org.apache.hudi.common.config.RecordMergeMode;
 import org.apache.hudi.common.engine.HoodieReaderContext;
 import org.apache.hudi.common.model.HoodieRecord;
+import org.apache.hudi.common.model.WriteOperationType;
 import org.apache.hudi.common.table.HoodieTableConfig;
 import org.apache.hudi.common.table.HoodieTableMetaClient;
+import org.apache.hudi.common.table.log.InstantRange;
 import org.apache.hudi.common.table.read.CustomPayloadForTesting;
 import org.apache.hudi.common.table.read.HoodieFileGroupReader;
 import org.apache.hudi.common.table.read.TestHoodieFileGroupReaderBase;
 import org.apache.hudi.common.testutils.HoodieTestDataGenerator;
+import org.apache.hudi.common.testutils.HoodieTestUtils;
 import org.apache.hudi.common.util.CollectionUtils;
 import org.apache.hudi.common.util.Option;
+import org.apache.hudi.common.util.collection.ClosableIterator;
 import org.apache.hudi.configuration.FlinkOptions;
 import org.apache.hudi.configuration.HadoopConfigurations;
 import org.apache.hudi.exception.HoodieException;
@@ -53,6 +57,7 @@ import org.apache.flink.table.runtime.typeutils.RowDataSerializer;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.params.ParameterizedTest;
+import org.junit.jupiter.params.provider.EnumSource;
 import org.junit.jupiter.params.provider.MethodSource;
 import org.mockito.Mockito;
 
@@ -64,6 +69,7 @@ import java.util.Map;
 import java.util.stream.Collectors;
 
 import static org.apache.hudi.common.model.HoodieRecord.DEFAULT_ORDERING_VALUE;
+import static org.apache.hudi.common.model.WriteOperationType.INSERT;
 import static org.apache.hudi.common.model.WriteOperationType.UPSERT;
 import static org.apache.hudi.common.testutils.HoodieTestDataGenerator.TRIP_EXAMPLE_SCHEMA;
 import static org.junit.jupiter.api.Assertions.assertEquals;
@@ -74,6 +80,7 @@ import static org.mockito.Mockito.when;
  */
 public class TestHoodieFileGroupReaderOnFlink extends TestHoodieFileGroupReaderBase<RowData> {
   private Configuration conf;
+  private Option<InstantRange> instantRangeOpt = Option.empty();
   private static final Schema RECORD_SCHEMA = getRecordAvroSchema();
   private static final AvroToRowDataConverters.AvroToRowDataConverter AVRO_CONVERTER =
       RowDataAvroQueryContexts.fromAvroSchema(RECORD_SCHEMA).getAvroToRowDataConverter();
@@ -109,7 +116,8 @@ public class TestHoodieFileGroupReaderOnFlink extends TestHoodieFileGroupReaderB
         storageConf,
         () -> InternalSchemaManager.DISABLED,
         Collections.emptyList(),
-        metaClient.getTableConfig());
+        metaClient.getTableConfig(),
+        instantRangeOpt);
   }
 
   @Override
@@ -123,10 +131,11 @@ public class TestHoodieFileGroupReaderOnFlink extends TestHoodieFileGroupReaderB
       List<RowData> recordList,
       Schema recordSchema) throws IOException {
     RowDataSerializer rowDataSerializer = RowDataAvroQueryContexts.getRowDataSerializer(recordSchema);
-    fileGroupReader.initRecordIterators();
-    while (fileGroupReader.hasNext()) {
-      RowData rowData = rowDataSerializer.copy(fileGroupReader.next());
-      recordList.add(rowData);
+    try (ClosableIterator<RowData> iterator = fileGroupReader.getClosableIterator()) {
+      while (iterator.hasNext()) {
+        RowData rowData = rowDataSerializer.copy(iterator.next());
+        recordList.add(rowData);
+      }
     }
   }
 
@@ -162,7 +171,7 @@ public class TestHoodieFileGroupReaderOnFlink extends TestHoodieFileGroupReaderB
     HoodieTableConfig tableConfig = Mockito.mock(HoodieTableConfig.class);
     when(tableConfig.populateMetaFields()).thenReturn(true);
     FlinkRowDataReaderContext readerContext =
-        new FlinkRowDataReaderContext(getStorageConf(), () -> InternalSchemaManager.DISABLED, Collections.emptyList(), tableConfig);
+        new FlinkRowDataReaderContext(getStorageConf(), () -> InternalSchemaManager.DISABLED, Collections.emptyList(), tableConfig, Option.empty());
     Schema schema = SchemaBuilder.builder()
         .record("test")
         .fields()
@@ -180,7 +189,7 @@ public class TestHoodieFileGroupReaderOnFlink extends TestHoodieFileGroupReaderB
     HoodieTableConfig tableConfig = Mockito.mock(HoodieTableConfig.class);
     when(tableConfig.populateMetaFields()).thenReturn(true);
     FlinkRowDataReaderContext readerContext =
-        new FlinkRowDataReaderContext(getStorageConf(), () -> InternalSchemaManager.DISABLED, Collections.emptyList(), tableConfig);
+        new FlinkRowDataReaderContext(getStorageConf(), () -> InternalSchemaManager.DISABLED, Collections.emptyList(), tableConfig, Option.empty());
     Schema schema = SchemaBuilder.builder()
         .record("test")
         .fields()
@@ -198,7 +207,7 @@ public class TestHoodieFileGroupReaderOnFlink extends TestHoodieFileGroupReaderB
     when(tableConfig.populateMetaFields()).thenReturn(false);
     when(tableConfig.getRecordKeyFields()).thenReturn(Option.of(new String[] {"field1"}));
     FlinkRowDataReaderContext readerContext =
-        new FlinkRowDataReaderContext(getStorageConf(), () -> InternalSchemaManager.DISABLED, Collections.emptyList(), tableConfig);
+        new FlinkRowDataReaderContext(getStorageConf(), () -> InternalSchemaManager.DISABLED, Collections.emptyList(), tableConfig, Option.empty());
     Schema schema = SchemaBuilder.builder()
         .record("test")
         .fields()
@@ -216,7 +225,7 @@ public class TestHoodieFileGroupReaderOnFlink extends TestHoodieFileGroupReaderB
     when(tableConfig.populateMetaFields()).thenReturn(false);
     when(tableConfig.getRecordKeyFields()).thenReturn(Option.of(new String[] {"field1", "field2"}));
     FlinkRowDataReaderContext readerContext =
-        new FlinkRowDataReaderContext(getStorageConf(), () -> InternalSchemaManager.DISABLED, Collections.emptyList(), tableConfig);
+        new FlinkRowDataReaderContext(getStorageConf(), () -> InternalSchemaManager.DISABLED, Collections.emptyList(), tableConfig, Option.empty());
 
     Schema schema = SchemaBuilder.builder()
         .record("test")
@@ -251,6 +260,35 @@ public class TestHoodieFileGroupReaderOnFlink extends TestHoodieFileGroupReaderB
       validateOutputFromFileGroupReader(
           getStorageConf(), getBasePath(), false, 2, recordMergeMode,
           allRecords, CollectionUtils.combine(initialRecords, updates));
+    }
+  }
+
+  @ParameterizedTest
+  @EnumSource(value = WriteOperationType.class, names = {"INSERT", "UPSERT"})
+  public void testFilterFileWithInstantRange(WriteOperationType firstCommitOperation) throws Exception {
+    RecordMergeMode recordMergeMode = RecordMergeMode.EVENT_TIME_ORDERING;
+    Map<String, String> writeConfigs = new HashMap<>(getCommonConfigs(recordMergeMode, true));
+    boolean isFirstCommitInsert = firstCommitOperation == INSERT;
+
+    try (HoodieTestDataGenerator dataGen = new HoodieTestDataGenerator(0xDEEF)) {
+      // One commit; reading one file group containing a log file only
+      List<HoodieRecord> initialRecords = dataGen.generateInserts("001", 100);
+      commitToTable(initialRecords, firstCommitOperation.value(), writeConfigs);
+      validateOutputFromFileGroupReader(
+          getStorageConf(), getBasePath(), isFirstCommitInsert,
+          isFirstCommitInsert ? 0 : 1, recordMergeMode, initialRecords, initialRecords);
+
+      HoodieTableMetaClient metaClient = HoodieTestUtils.createMetaClient(getStorageConf(), getBasePath());
+      String latestCompleteTime = metaClient.getActiveTimeline().getLatestCompletionTime().get();
+      instantRangeOpt = Option.of(InstantRange.builder().startInstant(latestCompleteTime).rangeType(InstantRange.RangeType.OPEN_CLOSED).build());
+
+      // the base/log file of the first commit is filtered out by the instant range.
+      List<HoodieRecord> updates = dataGen.generateUniqueUpdates("002", 50);
+      commitToTable(updates, UPSERT.value(), writeConfigs);
+      validateOutputFromFileGroupReader(getStorageConf(), getBasePath(),
+          isFirstCommitInsert, isFirstCommitInsert ? 1 : 2, recordMergeMode, updates, updates);
+      // reset instant range
+      instantRangeOpt = Option.empty();
     }
   }
 

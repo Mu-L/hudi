@@ -21,9 +21,10 @@ package org.apache.hudi.table.functional;
 
 import org.apache.hudi.avro.model.HoodieRollbackMetadata;
 import org.apache.hudi.client.SparkRDDWriteClient;
+import org.apache.hudi.client.WriteClientTestUtils;
 import org.apache.hudi.client.WriteStatus;
 import org.apache.hudi.client.common.HoodieSparkEngineContext;
-import org.apache.hudi.client.functional.TestHoodieBackedMetadata;
+import org.apache.hudi.functional.TestHoodieBackedMetadata;
 import org.apache.hudi.common.config.HoodieMetadataConfig;
 import org.apache.hudi.common.config.TypedProperties;
 import org.apache.hudi.common.model.HoodieDeltaWriteStat;
@@ -77,23 +78,25 @@ public class TestHoodieSparkRollback extends SparkClientFunctionalTestHarness {
     /*
      * Write 1 (only inserts, written as base file)
      */
-    client.startCommitWithTime(commitTime);
+    WriteClientTestUtils.startCommitWithTime(client, commitTime);
 
     List<HoodieRecord> records = dataGen.generateInserts(commitTime, 20);
     JavaRDD<HoodieRecord> writeRecords = jsc().parallelize(records, 1);
 
     List<WriteStatus> statuses = client.upsert(writeRecords, commitTime).collect();
+    client.commit(commitTime, jsc().parallelize(statuses));
     assertNoWriteErrors(statuses);
     return records;
   }
 
   protected List<WriteStatus> updateRecords(SparkRDDWriteClient client, HoodieTestDataGenerator dataGen, String commitTime,
                                           List<HoodieRecord> records) throws IOException {
-    client.startCommitWithTime(commitTime);
+    WriteClientTestUtils.startCommitWithTime(client, commitTime);
 
     records = dataGen.generateUpdates(commitTime, records);
     JavaRDD<HoodieRecord> writeRecords = jsc().parallelize(records, 1);
     List<WriteStatus> statuses = client.upsert(writeRecords, commitTime).collect();
+    client.commit(commitTime, jsc().parallelize(statuses));
     assertNoWriteErrors(statuses);
     return statuses;
   }
@@ -109,7 +112,6 @@ public class TestHoodieSparkRollback extends SparkClientFunctionalTestHarness {
         .withSchema(TRIP_EXAMPLE_SCHEMA)
         .withParallelism(2, 2)
         .withDeleteParallelism(2)
-        .withAutoCommit(autoCommit)
         .withEmbeddedTimelineServerEnabled(false).forTable("test-trip-table")
         .withRollbackUsingMarkers(true)
         .withMetadataConfig(HoodieMetadataConfig.newBuilder().enable(mdtEnable).build())

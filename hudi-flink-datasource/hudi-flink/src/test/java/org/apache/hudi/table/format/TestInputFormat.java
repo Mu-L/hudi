@@ -28,6 +28,7 @@ import org.apache.hudi.common.model.HoodieTableType;
 import org.apache.hudi.common.model.OverwriteWithLatestAvroPayload;
 import org.apache.hudi.common.model.PartialUpdateAvroPayload;
 import org.apache.hudi.common.table.HoodieTableMetaClient;
+import org.apache.hudi.common.table.HoodieTableVersion;
 import org.apache.hudi.common.table.cdc.HoodieCDCSupplementalLoggingMode;
 import org.apache.hudi.common.table.timeline.HoodieInstant;
 import org.apache.hudi.common.table.timeline.HoodieTimeline;
@@ -91,6 +92,7 @@ import static org.hamcrest.CoreMatchers.instanceOf;
 import static org.hamcrest.CoreMatchers.is;
 import static org.hamcrest.MatcherAssert.assertThat;
 import static org.junit.jupiter.api.Assertions.assertFalse;
+import static org.junit.jupiter.api.Assertions.assertSame;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
 /**
@@ -300,6 +302,31 @@ public class TestInputFormat {
 
     final String actual2 = TestData.rowDataToString(result2);
     assertThat(actual2, is(expected));
+  }
+
+  @Test
+  void testReadWithDeletes() throws Exception {
+    Map<String, String> options = new HashMap<>();
+    options.put(FlinkOptions.RECORD_KEY_FIELD.key(), "uuid");
+    beforeEach(HoodieTableType.MERGE_ON_READ, options);
+
+    // write another commit to read again
+    TestData.writeData(TestData.DATA_SET_UPDATE_DELETE, conf);
+
+    InputFormat<RowData, ?> inputFormat = this.tableSource.getInputFormat();
+    assertThat(inputFormat, instanceOf(MergeOnReadInputFormat.class));
+    ((MergeOnReadInputFormat) inputFormat).isEmitDelete(true);
+
+    List<RowData> result = readData(inputFormat);
+
+    final String actual = TestData.rowDataToString(result);
+    final String expected = "["
+        + "+I[id1, Danny, 24, 1970-01-01T00:00:00.001, par1], "
+        + "+I[id2, Stephen, 34, 1970-01-01T00:00:00.002, par1], "
+        + "-D[id3, null, null, null, null], "
+        + "-D[id5, null, null, null, null], "
+        + "-D[id9, null, null, null, null]]";
+    assertThat(actual, is(expected));
   }
 
   @Test
@@ -1329,6 +1356,27 @@ public class TestInputFormat {
     expected.put("par1", "[id1,par1,id1,Danny,23,2,par1]");
     // check result from base file
     TestData.checkWrittenData(tempFile, expected, expected.size());
+  }
+
+  @ParameterizedTest
+  @EnumSource(value = HoodieTableType.class)
+  void testStreamWriteAndReadWithUpgrade(HoodieTableType tableType) throws Exception {
+    Map<String, String> options = new HashMap<>();
+    options.put(FlinkOptions.WRITE_TABLE_VERSION.key(), HoodieTableVersion.SIX.versionCode() + "");
+    // init and write data with table version SIX
+    beforeEach(tableType, options);
+    TestData.writeData(TestData.DATA_SET_INSERT, conf);
+    assertSame(HoodieTableVersion.SIX, tableSource.getMetaClient().getTableConfig().getTableVersion());
+
+    // write another batch of data with table version EIGHT
+    conf.set(FlinkOptions.WRITE_TABLE_VERSION, HoodieTableVersion.EIGHT.versionCode());
+    TestData.writeData(TestData.DATA_SET_INSERT, conf);
+    this.tableSource = getTableSource(conf);
+    assertSame(HoodieTableVersion.EIGHT, tableSource.getMetaClient().getTableConfig().getTableVersion());
+
+    InputFormat<RowData, ?> inputFormat = this.tableSource.getInputFormat();
+    List<RowData> result = readData(inputFormat);
+    TestData.assertRowDataEquals(result, TestData.DATA_SET_INSERT);
   }
 
   // -------------------------------------------------------------------------
